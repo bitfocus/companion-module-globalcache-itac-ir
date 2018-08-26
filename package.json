@@ -1,0 +1,11 @@
+{
+  "name": "globalcache-itac-ir",
+  "version": "0.0.1",
+  "description": "Module to control devices through a Global Cache iTac IP2IR infrared interface.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Casey Selph",
+  "license": "ISC"
+}
