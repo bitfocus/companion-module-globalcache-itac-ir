@@ -148,11 +148,5 @@ instance.prototype.action = function(action) {
 
 };
 
-instance.module_info = {
-	label:   'Global Cache - iTach IP2IR',
-	id:      'globalcache-itac-ir',
-	version: '0.0.1'
-};
-
 instance_skel.extendedBy(instance);
 exports = module.exports = instance;

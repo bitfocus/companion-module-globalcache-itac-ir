@@ -1,11 +1,17 @@
 {
   "name": "globalcache-itac-ir",
-  "version": "0.0.1",
+  "version": "1.0.0",
+	"api_version": "1.0.0",
+	"keywords": [ "Generic" ],
+	"manufacturer": "Global Cache",
+	"product": "iTach IP2IR",
+	"shortname": "ip2ir",
   "description": "Module to control devices through a Global Cache iTac IP2IR infrared interface.",
   "main": "index.js",
+	"homepage": "https://www.globalcache.com/products/itach/ip2ir-pspecs/",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "Casey Selph",
+  "author": "Casey Selph <cxselph@gmail.com>",
   "license": "ISC"
 }
