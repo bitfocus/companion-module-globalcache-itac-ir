@@ -111,7 +111,7 @@ instance.prototype.actions = function(system) {
 						label:   'IR Code',
 						id:      'ir',
 						width:   12,
-						regex:   '/^\\d+(,\\d+)+$/'
+						regex:   '/((?:\\d+(?:,)?)+)/'
 					}
 			]
 		},
