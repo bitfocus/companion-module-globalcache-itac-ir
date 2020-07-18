@@ -126,7 +126,7 @@ instance.prototype.action = function(action) {
 	switch (action.action) {
 
 		case 'portSet':
-			cmd += opt.portNum + '1,' + opt.ir;
+			cmd += opt.portNum + ',' + opt.ir;
 			break;
 
 	}
