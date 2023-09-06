@@ -1,26 +1,19 @@
 {
 	"name": "globalcache-itac-ir",
-	"version": "1.0.7",
-	"api_version": "1.0.0",
-	"keywords": [
-		"Generic"
-	],
-	"manufacturer": "Global Cache",
-	"product": "iTach IP2IR",
-	"shortname": "ip2ir",
-	"description": "Module to control devices through a Global Cache iTac IP2IR infrared interface.",
+	"version": "2.0.0",
 	"main": "index.js",
-	"homepage": "https://github.com/bitfocus/companion-module-globalcache-itac-ir#readme",
 	"scripts": {
 		"test": "echo \"Error: no test specified\" && exit 1"
 	},
-	"author": "Casey Selph <cxselph@gmail.com>",
 	"license": "MIT",
-	"bugs": {
-		"url": "https://github.com/bitfocus/companion-module-globalcache-itac-ir/issues"
-	},
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/bitfocus/companion-module-globalcache-itac-ir.git"
+	},
+	"dependencies": {
+		"@companion-module/base": "~1.5.0"
+	},
+	"devDependencies": {
+		"@companion-module/tools": "^1.4.0"
 	}
 }
