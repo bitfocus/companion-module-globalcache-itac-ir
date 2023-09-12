@@ -13,7 +13,6 @@ module.exports = {
 			self.socket = new TCPHelper(self.config.host, 4998);
 
 			self.socket.on('connect', function () {
-				self.setVariable('connect_status', 'Connected');
 				self.updateStatus(InstanceStatus.Ok);
 			});
 	
