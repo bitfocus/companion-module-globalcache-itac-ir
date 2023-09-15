@@ -29,7 +29,7 @@ module.exports = {
 			callback: async function (action, bank) {
 				let opt = action.options;
 				let ir = await self.parseVariablesInString(opt.ir);
-				let cmd = 'sendir,1:' + opt.portNum + ir;
+				let cmd = `sendir,1:${opt.portNum},${ir}`;
 				self.sendCommand(cmd);
 			}
 		}
