@@ -1,0 +1,93 @@
+name: Update latest release in README
+
+on:
+  release:
+    types: [published]
+  # Module builds publish their release with the workflow token, which does
+  # not trigger release events, so also run when a build finishes
+  workflow_run:
+    workflows: [Build module release]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'release' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Read the latest release
+        if: ${{ github.event_name == 'workflow_run' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view --repo "$GITHUB_REPOSITORY" --json tagName,url,publishedAt \
+            --jq '"RELEASE_TAG=" + .tagName + "\nRELEASE_URL=" + .url + "\nRELEASE_DATE=" + .publishedAt' \
+            >> "$GITHUB_ENV"
+
+      - name: Use the published release
+        if: ${{ github.event_name == 'release' }}
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          URL: ${{ github.event.release.html_url }}
+          DATE: ${{ github.event.release.published_at }}
+        run: |
+          {
+            echo "RELEASE_TAG=$TAG"
+            echo "RELEASE_URL=$URL"
+            echo "RELEASE_DATE=$DATE"
+          } >> "$GITHUB_ENV"
+
+      - name: Update latest release section
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from datetime import datetime
+          from pathlib import Path
+
+          readme = Path("README.md")
+          contents = readme.read_text(encoding="utf-8")
+          start = "<!-- latest-release:start -->"
+          end = "<!-- latest-release:end -->"
+          if contents.count(start) != 1 or contents.count(end) != 1:
+              raise SystemExit("README.md must contain exactly one latest-release marker pair")
+
+          tag = os.environ["RELEASE_TAG"]
+          for character in "\\`*_{}[]()#+-.!|>":
+              tag = tag.replace(character, "\\" + character)
+          url = os.environ["RELEASE_URL"]
+          if not url.startswith("https://"):
+              raise SystemExit("Release URL must use HTTPS")
+          published = datetime.fromisoformat(os.environ["RELEASE_DATE"].replace("Z", "+00:00"))
+          date = published.date().isoformat()
+          section = f"\n**[{tag}]({url})** - {date} | [Release notes]({url})\n"
+          updated, replacements = re.subn(
+              re.escape(start) + r".*?" + re.escape(end),
+              lambda _: f"{start}{section}{end}",
+              contents,
+              count=1,
+              flags=re.DOTALL,
+          )
+          if replacements != 1:
+              raise SystemExit("Could not update the latest-release section")
+          readme.write_text(updated, encoding="utf-8")
+          PY
+
+      - name: Commit latest release update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --cached --quiet; then
+            echo "README already points to this release."
+            exit 0
+          fi
+          git commit -m "docs: update latest release in README"
+          git push
