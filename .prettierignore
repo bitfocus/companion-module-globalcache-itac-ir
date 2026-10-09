@@ -1,0 +1,5 @@
+package.json
+pkg
+yarn.lock
+*.tgz
+.github

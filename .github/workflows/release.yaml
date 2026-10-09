@@ -1,0 +1,113 @@
+name: Build module release
+
+# Publishes the installable Companion module (.tgz) as a numbered GitHub
+# release marked Latest, so it can be downloaded from the repository page.
+#
+# To publish a new version: raise "version" in package.json and add
+# release-notes/<version>.md, then push this branch. The build refuses to
+# publish a version that is not higher than every version already released.
+
+on:
+  push:
+    branches: [releases]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-module-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    if: ${{ github.repository_owner != 'bitfocus' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint
+        run: yarn lint
+
+      - name: Test
+        run: yarn test
+
+      - name: Check the version goes up
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          published=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName')
+          VERSION="$version" PUBLISHED="$published" node <<'JS'
+          const parse = (v) => {
+            const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(v.trim())
+            return m ? { nums: [+m[1], +m[2], +m[3]], pre: m[4] ?? null, text: v.trim() } : null
+          }
+          // Semver order: numbers first, and a pre-release (3.0.0-beta.5) is lower than 3.0.0
+          const compare = (a, b) => {
+            for (let i = 0; i < 3; i++) if (a.nums[i] !== b.nums[i]) return a.nums[i] - b.nums[i]
+            if (a.pre === b.pre) return 0
+            if (a.pre === null) return 1
+            if (b.pre === null) return -1
+            return a.pre < b.pre ? -1 : 1
+          }
+          const next = parse(process.env.VERSION)
+          if (!next || next.pre !== null) {
+            console.log(`::error::package.json version "${process.env.VERSION}" must be a plain number like 3.0.1`)
+            process.exit(1)
+          }
+          const existing = process.env.PUBLISHED.split('\n').map(parse).filter(Boolean)
+          const highest = existing.sort(compare).at(-1)
+          if (highest && compare(next, highest) <= 0) {
+            console.log(`::error::Version ${next.text} is not higher than the latest published version ${highest.text}. Raise "version" in package.json.`)
+            process.exit(1)
+          }
+          console.log(`Version ${next.text} will be published${highest ? `, up from ${highest.text}` : ''}`)
+          JS
+          test -f "release-notes/${version}.md" || { echo "::error::Missing release-notes/${version}.md"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build package
+        run: yarn package
+
+      - name: Verify package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tgz="globalcache-itac-ir-${VERSION}.tgz"
+          test -f "$tgz"
+          mkdir check && tar xzf "$tgz" -C check
+          node -e "
+            const m = require('./check/pkg/companion/manifest.json')
+            if (m.version !== process.env.VERSION) throw new Error('package says ' + m.version + ', expected ' + process.env.VERSION)
+            if (m.isPrerelease) throw new Error('package is marked as a pre-release')
+          "
+          node --check check/pkg/main.js
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            cat "release-notes/${VERSION}.md"
+            echo
+            echo "**To install:** download **globalcache-itac-ir-${VERSION}.tgz** below. In Companion, go to **Modules**, click **Import module package** and choose the file. Then pick version ${VERSION} in your Global Cache connection."
+          } > notes.md
+          gh release create "v${VERSION}" \
+            --target "$GITHUB_SHA" \
+            --title "Version ${VERSION}" \
+            --notes-file notes.md \
+            --latest \
+            "globalcache-itac-ir-${VERSION}.tgz"
