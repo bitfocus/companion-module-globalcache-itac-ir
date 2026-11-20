@@ -6,7 +6,14 @@
 //   - Pronto hex:           0000 006D 0022 0002 0157 00AC ...
 // Whitespace, line breaks and a trailing comma are tolerated in all formats.
 
-const LIMITS = {
+export interface IrCode {
+	frequency: number
+	repeat: number
+	offset: number
+	pulses: number[]
+}
+
+export const LIMITS = {
 	minFrequency: 15000,
 	maxFrequency: 500000,
 	minRepeat: 1,
@@ -17,9 +24,9 @@ const LIMITS = {
 // The Pronto carrier word is expressed in units of this many microseconds
 const PRONTO_CLOCK_US = 0.241246
 
-class IrCodeError extends Error {}
+export class IrCodeError extends Error {}
 
-function parseIrCode(input) {
+export function parseIrCode(input: string | null | undefined): IrCode {
 	if (input === undefined || input === null) throw new IrCodeError('No IR code entered')
 
 	const text = String(input).trim()
@@ -32,7 +39,7 @@ function parseIrCode(input) {
 	return parseGlobalCache(text)
 }
 
-function parseGlobalCache(text) {
+function parseGlobalCache(text: string): IrCode {
 	// Line breaks and spaces are common when codes are copied out of iLearn or a document
 	let body = text.replace(/\s+/g, '')
 
@@ -62,7 +69,7 @@ function parseGlobalCache(text) {
 	return validate({ frequency, repeat, offset, pulses })
 }
 
-function parseProntoHex(text) {
+function parseProntoHex(text: string): IrCode {
 	const words = text.split(/\s+/).map((w) => parseInt(w, 16))
 	const [type, carrier, onceLength, repeatLength, ...pulses] = words
 
@@ -84,11 +91,11 @@ function parseProntoHex(text) {
 	return validate({ frequency, repeat: 1, offset, pulses })
 }
 
-function isFrequency(value) {
+function isFrequency(value: number) {
 	return value >= LIMITS.minFrequency && value <= LIMITS.maxFrequency
 }
 
-function validate(code) {
+function validate(code: IrCode): IrCode {
 	const { frequency, repeat, offset, pulses } = code
 
 	if (!isFrequency(frequency)) {
@@ -114,7 +121,7 @@ function validate(code) {
 	return { frequency, repeat, offset, pulses }
 }
 
-function withRepeat(code, repeat) {
+export function withRepeat(code: IrCode, repeat: number | undefined): IrCode {
 	if (!repeat) return code
 	const value = Math.round(Number(repeat))
 	if (!(value >= LIMITS.minRepeat && value <= LIMITS.maxRepeat)) {
@@ -124,22 +131,13 @@ function withRepeat(code, repeat) {
 }
 
 /** How long the iTach needs to transmit the code, in milliseconds */
-function transmitDurationMs(code) {
-	const sum = (list) => list.reduce((total, pulse) => total + pulse, 0)
+export function transmitDurationMs(code: IrCode): number {
+	const sum = (list: number[]) => list.reduce((total, pulse) => total + pulse, 0)
 	const cycles = sum(code.pulses) + (code.repeat - 1) * sum(code.pulses.slice(code.offset - 1))
 	return (cycles / code.frequency) * 1000
 }
 
 /** The part of a sendir command after the ID */
-function formatIrCode(code) {
+export function formatIrCode(code: IrCode): string {
 	return [code.frequency, code.repeat, code.offset, ...code.pulses].join(',')
-}
-
-module.exports = {
-	IrCodeError,
-	LIMITS,
-	parseIrCode,
-	withRepeat,
-	transmitDurationMs,
-	formatIrCode,
 }

@@ -1,6 +1,6 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { parseResponse, LineSplitter } = require('../src/protocol')
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { parseResponse, LineSplitter } from '../dist/protocol.js'
 
 test('parses device responses', () => {
 	assert.deepEqual(parseResponse('completeir,1:2,345'), { type: 'complete', module: 1, port: 2, id: 345 })

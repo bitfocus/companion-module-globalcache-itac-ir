@@ -1,7 +1,30 @@
 // Global Caché Unified TCP API (port 4998) response parsing.
 // Commands and responses are terminated with a carriage return.
 
-const ERROR_CODES = {
+export interface DeviceInfo {
+	type: 'device'
+	module: number
+	ports: number
+	kind: string
+}
+
+export interface DeviceError {
+	type: 'error'
+	module?: number
+	port?: number
+	code: number
+	message: string
+}
+
+type DeviceResponse =
+	| DeviceInfo
+	| DeviceError
+	| { type: 'complete' | 'busy'; module: number; port: number; id: number }
+	| { type: 'stopped'; module: number; port: number }
+	| { type: 'endDevices' }
+	| { type: 'version' | 'other'; text: string }
+
+const ERROR_CODES: Partial<Record<number, string>> = {
 	1: 'Invalid command. Command not found',
 	2: 'Invalid module address (does not exist)',
 	3: 'Invalid connector address (does not exist)',
@@ -27,7 +50,7 @@ const ERROR_CODES = {
 	23: 'Unknown option',
 }
 
-function describeError(code) {
+export function describeError(code: number): string {
 	return ERROR_CODES[code] ?? `Device error ${code}`
 }
 
@@ -36,7 +59,7 @@ function describeError(code) {
  * Unrecognised lines are returned as { type: 'other' } so callers can still
  * treat them as proof the connection is alive (e.g. the getversion reply).
  */
-function parseResponse(line) {
+export function parseResponse(line: string): DeviceResponse {
 	let m
 
 	if ((m = line.match(/^completeir,(\d+):(\d+),(\d+)$/i))) {
@@ -80,21 +103,17 @@ function parseResponse(line) {
 }
 
 /** Splits a TCP stream into lines, buffering partial lines between chunks */
-class LineSplitter {
-	constructor() {
-		this.buffer = ''
-	}
+export class LineSplitter {
+	private buffer = ''
 
-	push(chunk) {
-		this.buffer += chunk.toString('latin1')
+	push(chunk: Buffer | string): string[] {
+		this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('latin1')
 		const parts = this.buffer.split(/\r\n|\r|\n/)
-		this.buffer = parts.pop()
+		this.buffer = parts.pop() ?? ''
 		return parts.map((line) => line.trim()).filter((line) => line !== '')
 	}
 
-	reset() {
+	reset(): void {
 		this.buffer = ''
 	}
 }
-
-module.exports = { parseResponse, describeError, LineSplitter }

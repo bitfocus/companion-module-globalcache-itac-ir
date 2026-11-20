@@ -1,21 +1,19 @@
-const { combineRgb } = require('@companion-module/base')
-const { PORT_CHOICES, toPort } = require('./actions')
+import { combineRgb } from '@companion-module/base'
+import { PORT_CHOICES, toPort } from './actions.js'
+import type { GlobalCacheInstance } from './types.js'
 
-module.exports = {
-	initFeedbacks: function () {
-		let self = this
-		let feedbacks = {}
-
-		feedbacks.connected = {
+export function UpdateFeedbacks(instance: GlobalCacheInstance): void {
+	instance.setFeedbackDefinitions({
+		connected: {
 			type: 'boolean',
 			name: 'Device connected',
 			description: 'True while the connection to the device is up and responding',
 			defaultStyle: { bgcolor: combineRgb(0, 153, 0), color: combineRgb(255, 255, 255) },
 			options: [],
-			callback: () => self.client.connected,
-		}
+			callback: () => instance.client.connected,
+		},
 
-		feedbacks.portBusy = {
+		portBusy: {
 			type: 'boolean',
 			name: 'Port sending',
 			description: 'True while a code is transmitting or queued on the port',
@@ -33,11 +31,11 @@ module.exports = {
 			],
 			callback: (feedback) => {
 				const port = toPort(feedback.options.portNum)
-				return port !== undefined && self.client.isPortBusy(port)
+				return port !== undefined && instance.client.isPortBusy(port)
 			},
-		}
+		},
 
-		feedbacks.lastFailed = {
+		lastFailed: {
 			type: 'boolean',
 			name: 'Last code failed',
 			description: 'True when the most recent code on the port (or any port) was not confirmed as sent',
@@ -54,14 +52,15 @@ module.exports = {
 				},
 			],
 			callback: (feedback) => {
+				const port = toPort(feedback.options.portNum)
 				const result =
 					feedback.options.portNum === 'any'
-						? self.lastResult
-						: self.lastResultByPort.get(toPort(feedback.options.portNum))
+						? instance.lastResult
+						: port === undefined
+							? undefined
+							: instance.lastResultByPort.get(port)
 				return result !== undefined && !result.ok
 			},
-		}
-
-		self.setFeedbackDefinitions(feedbacks)
-	},
+		},
+	})
 }

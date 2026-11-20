@@ -1,9 +1,9 @@
 // A minimal stand-in for an iTach IP2IR, used to exercise failure modes that
 // are hard to reproduce with real hardware on demand.
 
-const net = require('net')
+import net from 'net'
 
-class FakeItach {
+export class FakeItach {
 	constructor() {
 		this.received = []
 		this.sockets = new Set()
@@ -78,7 +78,7 @@ class FakeItach {
 			if (this.swallowSendir) return
 			return this._later(this.transmitMs, () => this._reply(socket, `completeir,${mod}:${port},${id}`))
 		}
-		if ((m = line.match(/^stopir,(\d+):(\d+)$/))) return this._reply(socket, line)
+		if (/^stopir,\d+:\d+$/.test(line)) return this._reply(socket, line)
 
 		if (Object.prototype.hasOwnProperty.call(this.rawReplies, line)) return this._reply(socket, this.rawReplies[line])
 		this._reply(socket, 'ERR_01')
@@ -99,5 +99,3 @@ class FakeItach {
 		await new Promise((resolve) => this.server.close(resolve))
 	}
 }
-
-module.exports = { FakeItach }

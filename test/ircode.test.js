@@ -1,6 +1,6 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { parseIrCode, withRepeat, transmitDurationMs, formatIrCode, IrCodeError } = require('../src/ircode')
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { parseIrCode, withRepeat, transmitDurationMs, formatIrCode, IrCodeError } from '../dist/ircode.js'
 
 const BODY = '38000,1,1,342,171,21,64,21,21,21,1520'
 

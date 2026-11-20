@@ -1,9 +1,9 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { once } = require('node:events')
-const { ItachClient } = require('../src/itach')
-const { parseIrCode } = require('../src/ircode')
-const { FakeItach } = require('./fake-itach')
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { once } from 'node:events'
+import { ItachClient } from '../dist/itach.js'
+import { parseIrCode } from '../dist/ircode.js'
+import { FakeItach } from './fake-itach.js'
 
 const CODE = parseIrCode('38000,1,1,342,171,21,64,21,21,21,1520')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))

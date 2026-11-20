@@ -1,69 +1,50 @@
-// Runs the Companion instance (index.js) against the simulated device with a
-// stand-in for the Companion host, to check actions, feedbacks, variables and
-// status are wired up correctly.
-
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const Module = require('node:module')
-const base = require('@companion-module/base')
-const { FakeItach } = require('./fake-itach')
+// Runs the built module using the real API base with a stand-in host context
+// and a simulated iTach.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { InstanceStatus } from '@companion-module/base'
+import GlobalCacheItachInstance, { UpgradeScripts } from '../dist/main.js'
+import { FakeItach } from './fake-itach.js'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-class StubInstanceBase {
-	constructor() {
-		this.label = 'ir'
-		this.statuses = []
-		this.logs = []
-		this.variables = {}
+function createInstance(t) {
+	const host = {
+		_isInstanceContext: true,
+		id: 'itach-test',
+		label: 'ir',
+		statuses: [],
+		logs: [],
+		variables: {},
+		updateStatus(status, message) {
+			this.statuses.push({ status, message })
+		},
+		setVariableDefinitions(definitions) {
+			this.variableDefinitions = definitions
+		},
+		setVariableValues(values) {
+			Object.assign(this.variables, values)
+		},
+		checkAllFeedbacks() {},
+		checkFeedbacks() {},
+		setActionDefinitions(actions) {
+			this.actions = actions
+		},
+		setFeedbackDefinitions(feedbacks) {
+			this.feedbacks = feedbacks
+		},
+		setPresetDefinitions(structure, presets) {
+			this.presetStructure = structure
+			this.presets = presets
+		},
 	}
-	log(level, message) {
-		this.logs.push({ level, message })
-	}
-	updateStatus(status, message) {
-		this.statuses.push({ status, message })
-	}
-	setVariableDefinitions() {}
-	setVariableValues(values) {
-		Object.assign(this.variables, values)
-	}
-	checkFeedbacks() {}
-	setActionDefinitions(actions) {
-		this.actions = actions
-	}
-	setFeedbackDefinitions(feedbacks) {
-		this.feedbacks = feedbacks
-	}
-	setPresetDefinitions(presets) {
-		this.presets = presets
-	}
-	async parseVariablesInString(text) {
-		return text.replace('$(internal:custom_code)', '38000,1,1,342,171,21,64,21,21,21,1520')
-	}
-}
 
-function loadInstanceClass() {
-	let InstanceClass
-	const originalLoad = Module._load
-	Module._load = function (request, ...rest) {
-		if (request === '@companion-module/base') {
-			return {
-				...base,
-				InstanceBase: StubInstanceBase,
-				runEntrypoint: (cls) => {
-					InstanceClass = cls
-				},
-			}
-		}
-		return originalLoad.call(this, request, ...rest)
-	}
-	try {
-		delete require.cache[require.resolve('../index.js')]
-		require('../index.js')
-	} finally {
-		Module._load = originalLoad
-	}
-	return InstanceClass
+	const originalLogger = globalThis.COMPANION_LOGGER
+	globalThis.COMPANION_LOGGER = (_source, level, message) => host.logs.push({ level, message })
+	t.after(() => {
+		globalThis.COMPANION_LOGGER = originalLogger
+	})
+	return { instance: new GlobalCacheItachInstance(host), host }
 }
 
 async function waitFor(check, timeout = 3000) {
@@ -77,80 +58,86 @@ async function waitFor(check, timeout = 3000) {
 test('instance connects, sends codes and reports results', async (t) => {
 	const device = new FakeItach()
 	await device.listen()
-	const Instance = loadInstanceClass()
-	const instance = new Instance({})
+	const { instance, host } = createInstance(t)
 	t.after(async () => {
 		await instance.destroy()
 		await device.close()
 	})
 
 	await instance.init({ host: '127.0.0.1', port: device.port, moduleAddress: 1 })
-	await waitFor(() => instance.variables.connection_status === 'Connected')
-	assert.equal(instance.statuses.at(-1).status, base.InstanceStatus.Ok)
-	await waitFor(() => instance.variables.firmware_version === '710-1005-05')
-	assert.equal(instance.feedbacks.connected.callback({ options: {} }), true)
+	await waitFor(() => host.variables.connection_status === 'Connected')
+	assert.equal(host.statuses.at(-1).status, InstanceStatus.Ok)
+	await waitFor(() => host.variables.firmware_version === '710-1005-05')
+	assert.equal(host.feedbacks.connected.callback({ options: {} }), true)
 
-	// A full iLearn line in a variable, sent with a repeat override
-	await instance.actions.portSet.callback({
-		options: { portNum: '2', ir: 'sendir,1:1,1,$(internal:custom_code)', repeat: 3 },
+	// The API 2.1 host expands variables before invoking the callback.
+	assert.equal(host.actions.portSet.options.find((field) => field.id === 'ir').useVariables, true)
+	await host.actions.portSet.callback({
+		options: { portNum: '2', ir: 'sendir,1:1,1,38000,1,1,342,171,21,64,21,21,21,1520', repeat: 3 },
 	})
 	assert.match(device.sendirs()[0], /^sendir,1:2,\d+,38000,3,1,342/)
-	assert.equal(instance.variables.last_result, 'complete')
-	assert.equal(instance.variables.sent_total, 1)
-	assert.equal(instance.feedbacks.lastFailed.callback({ options: { portNum: 'any' } }), false)
+	assert.equal(host.variables.last_result, 'complete')
+	assert.equal(host.variables.sent_total, 1)
+	assert.equal(host.feedbacks.lastFailed.callback({ options: { portNum: 'any' } }), false)
 
 	// An invalid code is reported and never reaches the device
-	await instance.actions.portSet.callback({ options: { portNum: '1', ir: '38000,1,1,342,171,21', repeat: 0 } })
+	await host.actions.portSet.callback({ options: { portNum: '1', ir: '38000,1,1,342,171,21', repeat: 0 } })
 	assert.equal(device.sendirs().length, 1)
-	assert.equal(instance.variables.last_result, 'invalid')
-	assert.equal(instance.variables.failed_total, 1)
-	assert.match(instance.variables.last_error, /on\/off pairs/)
-	assert.equal(instance.feedbacks.lastFailed.callback({ options: { portNum: '1' } }), true)
-	assert.equal(instance.feedbacks.lastFailed.callback({ options: { portNum: '2' } }), false)
+	assert.equal(host.variables.last_result, 'invalid')
+	assert.equal(host.variables.failed_total, 1)
+	assert.match(host.variables.last_error, /on\/off pairs/)
+	assert.equal(host.feedbacks.lastFailed.callback({ options: { portNum: '1' } }), true)
+	assert.equal(host.feedbacks.lastFailed.callback({ options: { portNum: '2' } }), false)
 
 	// Recovers from a dropped connection
 	device.dropAll()
-	await waitFor(() => instance.variables.connection_status === 'Disconnected')
-	assert.equal(instance.statuses.at(-1).status, base.InstanceStatus.ConnectionFailure)
-	await waitFor(() => instance.variables.connection_status === 'Connected')
-	assert.equal(instance.variables.reconnects, 1)
+	await waitFor(() => host.variables.connection_status === 'Disconnected')
+	assert.equal(host.statuses.at(-1).status, InstanceStatus.ConnectionFailure)
+	await waitFor(() => host.variables.connection_status === 'Connected')
+	assert.equal(host.variables.reconnects, 1)
 
-	assert.ok(Object.keys(instance.presets).length > 0)
+	assert.equal(Object.keys(host.presets).length, 10)
+	assert.deepEqual(
+		host.presetStructure[0].definitions.flatMap((group) => group.presets),
+		['status', 'send_1', 'send_2', 'send_3', 'hold_1', 'hold_2', 'hold_3', 'stop_1', 'stop_2', 'stop_3'],
+	)
+	assert.equal(host.presets.hold_1.type, 'simple')
+	assert.equal(host.presets.hold_1.steps[0].up[0].actionId, 'stopIR')
+	assert.ok(host.variableDefinitions.firmware_version)
+	assert.equal(UpgradeScripts.length, 2)
 })
 
 test('a module warning clears when a later connection reports an IR module', async (t) => {
 	const device = new FakeItach()
 	device.devices = ['device,0,0 ETHERNET', 'device,1,1 SERIAL']
 	await device.listen()
-	const Instance = loadInstanceClass()
-	const instance = new Instance({})
+	const { instance, host } = createInstance(t)
 	t.after(async () => {
 		await instance.destroy()
 		await device.close()
 	})
 
 	await instance.init({ host: '127.0.0.1', port: device.port, moduleAddress: 1 })
-	await waitFor(() => instance.statuses.at(-1)?.status === base.InstanceStatus.UnknownWarning)
+	await waitFor(() => host.statuses.at(-1)?.status === InstanceStatus.UnknownWarning)
 
 	device.devices = ['device,0,0 ETHERNET', 'device,1,3 IR']
-	const seen = instance.logs.length
-	await instance.actions.reconnect.callback()
-	await waitFor(() => instance.logs.slice(seen).some((entry) => entry.message.includes('1:IR(3)')))
+	const seen = host.logs.length
+	await host.actions.reconnect.callback()
+	await waitFor(() => host.logs.slice(seen).some((entry) => entry.message.includes('1:IR(3)')))
 
-	assert.equal(instance.statuses.at(-1).status, base.InstanceStatus.Ok)
-	assert.equal(instance.variables.reconnects, 0)
-	assert.ok(!instance.logs.slice(seen).some((entry) => entry.message.startsWith('Disconnected')))
+	assert.equal(host.statuses.at(-1).status, InstanceStatus.Ok)
+	assert.equal(host.variables.reconnects, 0)
+	assert.ok(!host.logs.slice(seen).some((entry) => entry.message.startsWith('Disconnected')))
 })
 
 test('instance without an IP address reports bad config', async (t) => {
-	const Instance = loadInstanceClass()
-	const instance = new Instance({})
+	const { instance, host } = createInstance(t)
 	t.after(() => instance.destroy())
 
 	await instance.init({ host: '' })
-	assert.equal(instance.statuses.at(-1).status, base.InstanceStatus.BadConfig)
-	const before = instance.logs.length
-	await instance.actions.portSet.callback({ options: { portNum: '1', ir: '38000,1,1,342,171', repeat: 0 } })
-	assert.equal(instance.variables.last_result, 'rejected')
-	assert.ok(instance.logs.length > before)
+	assert.equal(host.statuses.at(-1).status, InstanceStatus.BadConfig)
+	const before = host.logs.length
+	await host.actions.portSet.callback({ options: { portNum: '1', ir: '38000,1,1,342,171', repeat: 0 } })
+	assert.equal(host.variables.last_result, 'rejected')
+	assert.ok(host.logs.length > before)
 })

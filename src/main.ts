@@ -1,12 +1,13 @@
-const { InstanceBase, InstanceStatus, runEntrypoint } = require('@companion-module/base')
-const UpgradeScripts = require('./src/upgrades')
+import { InstanceBase, InstanceStatus, type SomeCompanionConfigField } from '@companion-module/base'
+import { CONFIG_DEFAULTS, GetConfigFields, type ModuleConfig } from './config.js'
+import { UpdateActions } from './actions.js'
+import { UpdateFeedbacks } from './feedbacks.js'
+import { UpdatePresets } from './presets.js'
+import { UpdateStatsVariables, UpdateVariableDefinitions } from './variables.js'
+import { ItachClient, type ClientState, type DeliveryResult, type StateInfo } from './itach.js'
+import type { GlobalCacheInstance, GlobalCacheTypes } from './types.js'
 
-const config = require('./src/config')
-const actions = require('./src/actions')
-const feedbacks = require('./src/feedbacks')
-const variables = require('./src/variables')
-const presets = require('./src/presets')
-const { ItachClient } = require('./src/itach')
+export { UpgradeScripts } from './upgrades.js'
 
 const STATE_LABELS = {
 	idle: 'Not configured',
@@ -15,47 +16,40 @@ const STATE_LABELS = {
 	disconnected: 'Disconnected',
 }
 
-class itacirInstance extends InstanceBase {
-	constructor(internal) {
-		super(internal)
+export default class GlobalCacheItachInstance extends InstanceBase<GlobalCacheTypes> implements GlobalCacheInstance {
+	client = new ItachClient()
+	lastResult: DeliveryResult | undefined
+	readonly lastResultByPort = new Map<number, DeliveryResult>()
+	invalidCount = 0
 
-		// Assign the methods from the listed files to this class
-		Object.assign(this, {
-			...config,
-			...actions,
-			...feedbacks,
-			...variables,
-			...presets,
-		})
+	private clientState: ClientState = 'idle'
+	private deviceWarning: string | null = null
+	private lastDisconnectMessage?: string
 
-		this.client = new ItachClient()
-		this.lastResult = undefined
-		this.lastResultByPort = new Map()
-		this.invalidCount = 0
+	getConfigFields(): SomeCompanionConfigField[] {
+		return GetConfigFields()
 	}
 
-	async init(config) {
-		this.initVariables()
-		this.initActions()
-		this.initFeedbacks()
-		this.initPresets()
+	async init(config: ModuleConfig): Promise<void> {
+		UpdateVariableDefinitions(this)
+		UpdateActions(this)
+		UpdateFeedbacks(this)
+		UpdatePresets(this)
 
 		await this.configUpdated(config)
 	}
 
-	async destroy() {
+	async destroy(): Promise<void> {
 		this.stopClient()
 	}
 
-	async configUpdated(config) {
-		this.config = { ...this.CONFIG_DEFAULTS, ...config }
-		this.startClient()
+	async configUpdated(config: ModuleConfig): Promise<void> {
+		this.startClient({ ...CONFIG_DEFAULTS, ...config })
 	}
 
-	startClient() {
+	private startClient(cfg: ModuleConfig) {
 		this.stopClient()
 
-		const cfg = this.config
 		this.client = new ItachClient({
 			host: cfg.host,
 			port: cfg.port,
@@ -79,13 +73,13 @@ class itacirInstance extends InstanceBase {
 			last_error: '',
 			last_latency_ms: '',
 		})
-		this.updateStatsVariables()
-		this.checkFeedbacks()
+		UpdateStatsVariables(this)
+		this.checkAllFeedbacks()
 
 		this.client.on('state', (state, message, info) => this.onClientState(state, message, info))
 		this.client.on('result', (result) => this.recordResult(result))
 		this.client.on('queue', () => {
-			this.updateStatsVariables()
+			UpdateStatsVariables(this)
 			this.checkFeedbacks('portBusy')
 		})
 		this.client.on('version', (version) => this.setVariableValues({ firmware_version: version }))
@@ -107,12 +101,12 @@ class itacirInstance extends InstanceBase {
 		this.client.start()
 	}
 
-	stopClient() {
+	private stopClient() {
 		this.client.removeAllListeners()
 		this.client.stop()
 	}
 
-	onClientState(state, message, info = {}) {
+	private onClientState(state: ClientState, message?: string, info: StateInfo = {}) {
 		const previous = this.clientState
 		this.clientState = state
 
@@ -129,7 +123,7 @@ class itacirInstance extends InstanceBase {
 				if (info.manual || previous !== 'disconnected') this.updateStatus(InstanceStatus.Connecting, message)
 				break
 			case 'connected':
-				this.log('info', message)
+				if (message) this.log('info', message)
 				if (this.deviceWarning) this.updateStatus(InstanceStatus.UnknownWarning, this.deviceWarning)
 				else this.updateStatus(InstanceStatus.Ok)
 				break
@@ -145,7 +139,7 @@ class itacirInstance extends InstanceBase {
 		}
 	}
 
-	recordResult(result) {
+	recordResult(result: DeliveryResult): void {
 		// Codes cancelled on purpose (Stop IR, Clear queue) are not delivery failures
 		if (result.status === 'cancelled') return
 		if (result.status === 'invalid') this.invalidCount++
@@ -162,9 +156,7 @@ class itacirInstance extends InstanceBase {
 
 		if (!result.ok) this.log('warn', `Port ${result.port}: ${result.error}`)
 
-		this.updateStatsVariables()
+		UpdateStatsVariables(this)
 		this.checkFeedbacks('lastFailed', 'portBusy')
 	}
 }
-
-runEntrypoint(itacirInstance, UpgradeScripts)
