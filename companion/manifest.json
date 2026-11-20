@@ -2,7 +2,7 @@
 	"id": "globalcache-itac-ir",
 	"name": "globalcache-itac-ir",
 	"shortname": "ip2ir",
-	"description": "Module to control devices through a Global Cache iTac IP2IR infrared interface.",
+	"description": "Control devices through Global Caché iTach IR interfaces (IP2IR / WF2IR) with confirmed delivery and automatic recovery.",
 	"version": "0.0.0",
 	"license": "MIT",
 	"repository": "git+https://github.com/bitfocus/companion-module-globalcache-itac-ir.git",
@@ -15,20 +15,20 @@
 		{
 			"name": "Joseph Adams",
 			"email": "josephdadams@gmail.com"
+		},
+		{
+			"name": "Mike Moore",
+			"email": "mike@emmauschurch.com"
 		}
 	],
 	"legacyIds": [],
 	"runtime": {
-		"type": "node18",
+		"type": "node22",
 		"api": "nodejs-ipc",
 		"apiVersion": "0.0.0",
 		"entrypoint": "../index.js"
 	},
 	"manufacturer": "Global Cache",
-	"products": [
-		"iTach IP2IR"
-	],
-	"keywords": [
-		"Generic"
-	]
+	"products": ["iTach IP2IR", "iTach WF2IR"],
+	"keywords": ["IR", "Infrared", "Remote", "Projector", "Display"]
 }

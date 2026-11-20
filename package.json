@@ -1,19 +1,30 @@
 {
 	"name": "globalcache-itac-ir",
-	"version": "2.0.3",
+	"version": "3.0.0",
 	"main": "index.js",
 	"scripts": {
-		"test": "echo \"Error: no test specified\" && exit 1"
+		"test": "node --test test/*.test.js",
+		"format": "prettier -w .",
+		"lint": "eslint",
+		"package": "companion-module-build"
 	},
 	"license": "MIT",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/bitfocus/companion-module-globalcache-itac-ir.git"
 	},
+	"engines": {
+		"node": "^22.8"
+	},
+	"prettier": "@companion-module/tools/.prettierrc.json",
 	"dependencies": {
-		"@companion-module/base": "~1.5.0"
+		"@companion-module/base": "~1.14.1"
 	},
 	"devDependencies": {
-		"@companion-module/tools": "^2.8.0"
-	}
+		"@companion-module/tools": "^2.8.0",
+		"eslint": "^9",
+		"prettier": "^3",
+		"typescript-eslint": "^8"
+	},
+	"packageManager": "yarn@1.22.22"
 }
