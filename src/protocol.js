@@ -68,6 +68,13 @@ function parseResponse(line) {
 	if (/^endlistdevices$/i.test(line)) {
 		return { type: 'endDevices' }
 	}
+	// GC-100 answers "version,0,3.0-12", iTach answers "710-1005-05"
+	if ((m = line.match(/^version,\d+,(.*)$/i))) {
+		return { type: 'version', text: m[1].trim() }
+	}
+	if (/^\d+(?:[.-]\d+)+$/.test(line)) {
+		return { type: 'version', text: line }
+	}
 
 	return { type: 'other', text: line }
 }

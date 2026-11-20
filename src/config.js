@@ -64,7 +64,7 @@ module.exports = {
 				id: 'maxCommandAge',
 				label: 'Discard codes not started within (ms)',
 				tooltip:
-					'Codes waiting while the device is offline or the port is busy are dropped after this time, so a power toggle is never fired long after the button was pressed.',
+					'Codes waiting while the device is offline or the port is busy are dropped after this time, so a power toggle is never fired long after the button was pressed. Time waiting behind another code this module is already sending does not count.',
 				width: 6,
 				min: 250,
 				max: 60000,
@@ -74,7 +74,8 @@ module.exports = {
 				type: 'number',
 				id: 'retries',
 				label: 'Retries',
-				tooltip: 'How often a code is retried when the port is busy (in use by another controller).',
+				tooltip:
+					'How often a code is retried when the port is busy (in use by another controller), and how many times it is resent when "Also resend when delivery is unconfirmed" is enabled.',
 				width: 6,
 				min: 0,
 				max: 10,

@@ -31,6 +31,7 @@ class itacirInstance extends InstanceBase {
 		this.client = new ItachClient()
 		this.lastResult = undefined
 		this.lastResultByPort = new Map()
+		this.invalidCount = 0
 	}
 
 	async init(config) {
@@ -67,6 +68,7 @@ class itacirInstance extends InstanceBase {
 		})
 		this.lastResult = undefined
 		this.lastResultByPort.clear()
+		this.invalidCount = 0
 		this.deviceWarning = null
 
 		this.setVariableValues({
@@ -80,7 +82,7 @@ class itacirInstance extends InstanceBase {
 		this.updateStatsVariables()
 		this.checkFeedbacks()
 
-		this.client.on('state', (state, message) => this.onClientState(state, message))
+		this.client.on('state', (state, message, info) => this.onClientState(state, message, info))
 		this.client.on('result', (result) => this.recordResult(result))
 		this.client.on('queue', () => {
 			this.updateStatsVariables()
@@ -90,10 +92,10 @@ class itacirInstance extends InstanceBase {
 		this.client.on('devices', (devices, problem) => {
 			this.log('info', `Device modules: ${devices.map((d) => `${d.module}:${d.kind}(${d.ports})`).join(', ')}`)
 			this.deviceWarning = problem
-			if (problem) {
-				this.log('warn', problem)
-				this.updateStatus(InstanceStatus.UnknownWarning, problem)
-			}
+			if (problem) this.log('warn', problem)
+			if (!this.client.connected) return
+			if (problem) this.updateStatus(InstanceStatus.UnknownWarning, problem)
+			else this.updateStatus(InstanceStatus.Ok)
 		})
 		this.client.on('log', (level, message) => this.log(level, message))
 
@@ -110,7 +112,7 @@ class itacirInstance extends InstanceBase {
 		this.client.stop()
 	}
 
-	onClientState(state, message) {
+	onClientState(state, message, info = {}) {
 		const previous = this.clientState
 		this.clientState = state
 
@@ -119,15 +121,20 @@ class itacirInstance extends InstanceBase {
 
 		switch (state) {
 			case 'connecting':
+				// The next device list is a new answer; don't keep the previous one.
+				this.deviceWarning = null
 				// Only show "connecting" for the first attempt, so a device that is
-				// offline keeps showing the reason it failed while retrying
-				if (previous !== 'disconnected') this.updateStatus(InstanceStatus.Connecting, message)
+				// offline keeps showing the reason it failed while retrying.
+				// A manual reconnect always shows it, including while already offline.
+				if (info.manual || previous !== 'disconnected') this.updateStatus(InstanceStatus.Connecting, message)
 				break
 			case 'connected':
 				this.log('info', message)
-				this.updateStatus(this.deviceWarning ? InstanceStatus.UnknownWarning : InstanceStatus.Ok, this.deviceWarning)
+				if (this.deviceWarning) this.updateStatus(InstanceStatus.UnknownWarning, this.deviceWarning)
+				else this.updateStatus(InstanceStatus.Ok)
 				break
 			case 'disconnected':
+				this.deviceWarning = null
 				// Avoid flooding the log with the same failure on every retry
 				if (previous === 'connected' || message !== this.lastDisconnectMessage) {
 					this.log('warn', `Disconnected: ${message}. Reconnecting automatically.`)
@@ -141,6 +148,7 @@ class itacirInstance extends InstanceBase {
 	recordResult(result) {
 		// Codes cancelled on purpose (Stop IR, Clear queue) are not delivery failures
 		if (result.status === 'cancelled') return
+		if (result.status === 'invalid') this.invalidCount++
 
 		this.lastResult = result
 		this.lastResultByPort.set(result.port, result)

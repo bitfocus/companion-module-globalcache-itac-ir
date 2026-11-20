@@ -45,7 +45,7 @@ Codes saved with earlier versions of this module keep working. Spaces and line b
 
 - Each port sends one code at a time and waits for the iTach to confirm it before sending the next, so a quick second press never cuts off the first code. Ports work independently.
 - If another controller is using the port (_busyIR_), the code is retried automatically (see **Retries**).
-- Codes pressed while the device is offline are sent as soon as it reconnects, unless they've waited longer than **Discard codes not started within**. That keeps a power toggle from firing long after someone pressed it.
+- Codes pressed while the device is offline, or while another controller holds the port, are sent once it is free unless they have waited longer than **Discard codes not started within**. Time spent waiting behind a code this module is already sending does not count, so a button that sends several codes still sends them all. The limit keeps a power toggle from firing long after someone pressed it.
 - If the connection drops while a code is sending, or no confirmation arrives, the code is **not** resent by default, because resending a toggle code (such as a single power button) would undo it. Enable **Also resend when delivery is unconfirmed** only if your codes are all discrete (e.g. separate Power On and Power Off codes).
 
 ### Recovery

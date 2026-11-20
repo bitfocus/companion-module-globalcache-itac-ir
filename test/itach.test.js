@@ -256,6 +256,135 @@ test('rejects new codes when a port queue is full', async (t) => {
 	assert.equal(result.status, 'rejected')
 })
 
+test('codes waiting behind one already sending are not discarded', async (t) => {
+	const { device, client } = await setup(t, { maxCommandAge: 80 })
+	device.transmitMs = 120
+
+	const results = await Promise.all([client.sendIR(1, CODE), client.sendIR(1, CODE), client.sendIR(1, CODE)])
+	assert.ok(results.every((r) => r.status === 'complete'))
+	assert.equal(device.sendirs().length, 3)
+})
+
+test('a code expires when the port stays busy past the discard limit', async (t) => {
+	const { device, client } = await setup(t, { maxCommandAge: 250, retries: 10, busyRetryDelay: 40 })
+	device.busyCount = 20
+
+	const result = await client.sendIR(1, CODE)
+	assert.equal(result.status, 'expired')
+	assert.match(result.error, /port was busy/)
+})
+
+test('clearQueue discards codes that have not started', async (t) => {
+	const { device, client } = await setup(t)
+	device.swallowSendir = true
+
+	const inflight = client.sendIR(1, CODE)
+	const queued = client.sendIR(1, CODE)
+	await sleep(20)
+	client.clearQueue()
+
+	assert.equal((await queued).status, 'cancelled')
+	assert.equal(client.queueDepth(), 1)
+	assert.equal(client.stopIR(1), true)
+	assert.equal((await inflight).status, 'stopped')
+})
+
+test('Stop IR cancels a code waiting to retry a busy port', async (t) => {
+	const { device, client } = await setup(t, { retries: 5, busyRetryDelay: 500 })
+	device.busyCount = 5
+
+	const retrying = once(client, 'log')
+	const pending = client.sendIR(1, CODE)
+	await retrying
+	assert.equal(client.stopIR(1), true)
+
+	assert.equal((await pending).status, 'cancelled')
+	await sleep(30)
+	assert.equal(device.sendirs().length, 1)
+})
+
+test('stop settles a code that is still in flight', async (t) => {
+	const { device, client } = await setup(t)
+	device.swallowSendir = true
+
+	const pending = client.sendIR(1, CODE)
+	await sleep(20)
+	client.stop()
+	// The socket is gone, so the code may already have been transmitted
+	assert.equal((await pending).status, 'uncertain')
+})
+
+test('resends after the connection drops when retryUncertain is enabled', async (t) => {
+	const { device, client } = await setup(t, { retryUncertain: true, retries: 2 })
+	device.swallowSendir = true
+
+	const pending = client.sendIR(1, CODE)
+	await sleep(30)
+	assert.equal(device.sendirs().length, 1)
+	device.swallowSendir = false
+	device.dropAll()
+
+	const result = await pending
+	assert.equal(result.ok, true)
+	assert.equal(result.attempts, 2)
+})
+
+test('a port-less error fails the single code in flight', async (t) => {
+	const { device, client } = await setup(t)
+	while (client.unattributedRequests > 0) await sleep(10)
+	device.portlessError = true
+	device.errorCode = '008'
+
+	const result = await client.sendIR(1, CODE)
+	assert.equal(result.status, 'error')
+	assert.match(result.error, /Invalid pulse count/)
+})
+
+test('a port-less error from a raw command does not fail the code in flight', async (t) => {
+	const { device, client } = await setup(t)
+	while (client.unattributedRequests > 0) await sleep(10)
+	device.swallowSendir = true
+
+	let settled
+	const pending = client.sendIR(1, CODE).then((result) => {
+		settled = result
+		return result
+	})
+	await sleep(20)
+	assert.equal(client.sendRaw('no-such-command'), true)
+	await sleep(30)
+	assert.equal(settled, undefined, 'the raw command error must not fail the IR code')
+
+	assert.equal(client.stopIR(1), true)
+	assert.equal((await pending).status, 'stopped')
+})
+
+test('a raw command reply is not stored as the firmware version', async (t) => {
+	const { device, client } = await setup(t, { keepaliveInterval: 40 })
+	while (client.version === '') await sleep(10)
+	const versions = []
+	client.on('version', (version) => versions.push(version))
+	device.rawReplies['get_IR,1:1'] = 'IR,1:1,IR'
+
+	assert.equal(client.sendRaw('get_IR,1:1'), true)
+	await sleep(100)
+	assert.ok(versions.includes('710-1005-05'))
+	assert.ok(versions.every((version) => version === '710-1005-05'))
+	assert.equal(client.version, '710-1005-05')
+})
+
+test('a manual reconnect is not counted or reported as a failure', async (t) => {
+	const { client } = await setup(t)
+	const states = []
+	client.on('state', (state) => states.push(state))
+
+	client.reconnect('Reconnect requested')
+	await waitForState(client, 'connected')
+
+	assert.deepEqual(states, ['connecting', 'connected'])
+	assert.equal(client.stats.reconnects, 0)
+})
+
 test('keeps retrying with back-off while the device is unreachable', async (t) => {
 	const device = new FakeItach()
 	const port = await device.listen()

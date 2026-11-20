@@ -14,8 +14,10 @@
 //   - A command whose outcome is unknown (connection dropped, confirmation never
 //     arrived) is NOT resent by default, because resending a toggle code such
 //     as projector power would undo it. This can be enabled in the config.
-//   - Commands that cannot be started within maxCommandAge (e.g. while the
-//     device is offline) are discarded rather than fired late.
+//   - Commands that cannot be started within maxCommandAge (while the device is
+//     offline, or the port stays busy) are discarded rather than fired late.
+//     Time spent queued behind a code this module is already sending does not
+//     count, so several codes pressed together are still delivered in order.
 //   - The connection is watched with a keepalive probe, so a device that loses
 //     power or network without closing the socket is detected and reconnected.
 
@@ -60,7 +62,7 @@ class ItachClient extends EventEmitter {
 		this.tickTimer = null
 		this.lastRx = 0
 		this.probe = null
-		this.versionRequests = 0
+		this.unattributedRequests = 0
 		this.pendingDevices = []
 		this.devices = null
 		this.version = ''
@@ -87,6 +89,8 @@ class ItachClient extends EventEmitter {
 	/** Drop the current connection (if any) and connect again straight away */
 	reconnect(reason = 'Manual reconnect') {
 		if (!this.running) return
+		// A requested reconnect is not a failure: don't count it or report the link as down
+		this._manualReconnect = true
 		if (this.socket) this._dropConnection(this.socket, reason)
 		clearTimeout(this.reconnectTimer)
 		this.reconnectTimer = null
@@ -145,7 +149,8 @@ class ItachClient extends EventEmitter {
 	/** Send a raw API command, for advanced use */
 	sendRaw(line) {
 		if (!this.connected) return false
-		if (/^getversion$/i.test(line)) this.versionRequests++
+		// Its reply must not be mistaken for the result of an IR code in flight
+		this.unattributedRequests++
 		this._write(line)
 		return true
 	}
@@ -171,7 +176,9 @@ class ItachClient extends EventEmitter {
 		this.reconnectTimer = null
 
 		const { host, port, connectTimeout } = this.options
-		this._setState('connecting', `Connecting to ${host}:${port}`)
+		const manual = this._manualReconnect
+		this._manualReconnect = false
+		this._setState('connecting', `Connecting to ${host}:${port}`, manual ? { manual: true } : undefined)
 
 		const socket = new net.Socket()
 		this.socket = socket
@@ -188,7 +195,7 @@ class ItachClient extends EventEmitter {
 			socket.setKeepAlive(true, 5000)
 			this.reconnectDelay = this.options.reconnectMin
 			this.lastRx = Date.now()
-			this.versionRequests = 0
+			this.unattributedRequests = 0
 			this.pendingDevices = []
 			this._setState('connected', `Connected to ${host}:${port}`)
 			this.tickTimer = setInterval(() => this._tick(), this.options.tickInterval)
@@ -225,9 +232,14 @@ class ItachClient extends EventEmitter {
 				clearTimeout(cmd.completionTimer)
 				this._settleUncertain(cmd, `Connection lost while sending (${reason})`)
 			}
+			// Nothing of ours is transmitting now, so queued codes start ageing
+			this._syncQueueExpiry(p)
 		}
 
 		if (!this.running) return
+
+		// reconnect() connects again itself, without announcing a failure
+		if (this._manualReconnect) return
 
 		if (wasConnected) this.stats.reconnects++
 		this._setState('disconnected', reason)
@@ -247,7 +259,7 @@ class ItachClient extends EventEmitter {
 	_probe() {
 		if (!this.connected || this.probe) return
 		this.probe = { sentAt: Date.now() }
-		this.versionRequests++
+		this.unattributedRequests++
 		this._write('getversion')
 	}
 
@@ -275,11 +287,11 @@ class ItachClient extends EventEmitter {
 		return true
 	}
 
-	_setState(state, message) {
+	_setState(state, message, info) {
 		if (this.state === state && this.stateMessage === message) return
 		this.state = state
 		this.stateMessage = message
-		this.emit('state', state, message)
+		this.emit('state', state, message, info)
 	}
 
 	// ---------------------------------------------------------------- responses
@@ -308,21 +320,26 @@ class ItachClient extends EventEmitter {
 					p.waiting = {
 						cmd,
 						timer: setTimeout(() => {
+							if (p.waiting?.cmd !== cmd) return
 							p.waiting = null
+							this._pauseExpiry(cmd)
 							this._enqueue(cmd, true)
 							this._pump(cmd.port)
 						}, delay),
 					}
 				} else {
 					this._finish(cmd, false, 'busy', `Port ${cmd.port} stayed busy after ${cmd.attempts} attempts`)
-					this._pump(cmd.port)
 				}
-				return
+				return this._pump(cmd.port)
 			}
 			case 'error': {
 				const cmd = this._inflightForError(res)
 				const text = `${res.message} (ERR ${String(res.code).padStart(3, '0')})`
-				if (!cmd) return this.emit('log', 'warn', `Device reported: ${text}`)
+				if (!cmd) {
+					// A bare "ERR_008" may belong to a raw command or a keepalive probe
+					if (res.port === undefined) this._consumeUnattributed()
+					return this.emit('log', 'warn', `Device reported: ${text}`)
+				}
 				this._clearInflight(cmd)
 				this._finish(cmd, false, 'error', text)
 				return this._pump(cmd.port)
@@ -336,15 +353,18 @@ class ItachClient extends EventEmitter {
 				return this.emit('devices', this.devices, this._checkDevices())
 			case 'stopped':
 				return
+			case 'version':
+				this._consumeUnattributed()
+				this.version = res.text
+				return this.emit('version', this.version)
 			default:
-				if (this.versionRequests > 0) {
-					this.versionRequests--
-					// GC-100 answers "version,0,3.0-12", iTach answers "710-1005-05"
-					this.version = res.text.replace(/^version,\d+,/i, '')
-					return this.emit('version', this.version)
-				}
+				this._consumeUnattributed()
 				return this.emit('log', 'debug', `Unexpected reply from device: ${line}`)
 		}
+	}
+
+	_consumeUnattributed() {
+		if (this.unattributedRequests > 0) this.unattributedRequests--
 	}
 
 	_checkDevices() {
@@ -365,7 +385,9 @@ class ItachClient extends EventEmitter {
 
 	_inflightForError(res) {
 		if (res.port !== undefined) return this.ports.get(res.port)?.inflight ?? null
-		// Older error format without a connector: only attributable when a single command is in flight
+		// Older error format without a connector. Don't charge it to an IR code when a
+		// raw command or keepalive probe is also waiting for a reply.
+		if (this.unattributedRequests > 0) return null
 		const inflight = [...this.ports.values()].filter((p) => p.inflight).map((p) => p.inflight)
 		return inflight.length === 1 ? inflight[0] : null
 	}
@@ -385,22 +407,67 @@ class ItachClient extends EventEmitter {
 		return p.queue.length + (p.inflight ? 1 : 0) + (p.waiting ? 1 : 0)
 	}
 
-	/** Queue a command, discarding it if it cannot start within maxCommandAge of the original press */
+	/**
+	 * Queue a command. It is discarded once it has spent maxCommandAge waiting to
+	 * start while the device is offline or the port is busy. Time queued behind a
+	 * code this module is already transmitting does not count.
+	 */
 	_enqueue(cmd, front) {
 		const p = this._port(cmd.port)
-		const remaining = this.options.maxCommandAge - (Date.now() - cmd.enqueuedAt)
-		if (remaining <= 0) return this._expire(cmd)
-
-		cmd.expiryTimer = setTimeout(() => {
-			const index = p.queue.indexOf(cmd)
-			if (index === -1) return
-			p.queue.splice(index, 1)
-			this._expire(cmd)
-		}, remaining)
+		if (cmd.ageRemaining == null) cmd.ageRemaining = this.options.maxCommandAge
 
 		if (front) p.queue.unshift(cmd)
 		else p.queue.push(cmd)
+		this._syncQueueExpiry(p)
 		this.emit('queue')
+	}
+
+	/** Run the discard clock only while nothing of ours is transmitting on the port */
+	_syncQueueExpiry(p) {
+		const hold = !!p.inflight
+		const cmds = [...p.queue]
+		if (p.waiting) cmds.push(p.waiting.cmd)
+		for (const cmd of cmds) {
+			if (hold) this._pauseExpiry(cmd)
+			else this._armExpiry(cmd, p)
+		}
+	}
+
+	_armExpiry(cmd, p) {
+		if (cmd.done || cmd.expiryTimer) return
+		if (cmd.ageRemaining <= 0) {
+			this._removeQueued(cmd, p)
+			this._expire(cmd)
+			return
+		}
+
+		const timer = setTimeout(() => {
+			if (cmd.done || cmd.expiryTimer !== timer) return
+			cmd.expiryTimer = null
+			const portState = this._port(cmd.port)
+			if (!portState.queue.includes(cmd) && portState.waiting?.cmd !== cmd) return
+			this._removeQueued(cmd, portState)
+			this._expire(cmd)
+			this._pump(cmd.port)
+		}, cmd.ageRemaining)
+		cmd.expiryTimer = timer
+		cmd.ageStartedAt = Date.now()
+	}
+
+	_pauseExpiry(cmd) {
+		if (!cmd.expiryTimer) return
+		clearTimeout(cmd.expiryTimer)
+		cmd.expiryTimer = null
+		cmd.ageRemaining = Math.max(0, cmd.ageRemaining - (Date.now() - cmd.ageStartedAt))
+	}
+
+	_removeQueued(cmd, p) {
+		const index = p.queue.indexOf(cmd)
+		if (index !== -1) p.queue.splice(index, 1)
+		if (p.waiting?.cmd === cmd) {
+			clearTimeout(p.waiting.timer)
+			p.waiting = null
+		}
 	}
 
 	_expire(cmd) {
@@ -411,15 +478,17 @@ class ItachClient extends EventEmitter {
 			'expired',
 			`Discarded: could not start within ${this.options.maxCommandAge / 1000}s (${reason})`,
 		)
+		this.emit('queue')
 	}
 
 	_pump(port) {
 		const p = this._port(port)
+		this._syncQueueExpiry(p)
 		if (!this.connected || p.inflight || p.waiting) return
 
 		const cmd = p.queue.shift()
 		if (!cmd) return this.emit('queue')
-		clearTimeout(cmd.expiryTimer)
+		this._pauseExpiry(cmd)
 
 		cmd.id = this.nextId
 		this.nextId = this.nextId >= MAX_ID ? 1 : this.nextId + 1
@@ -440,6 +509,7 @@ class ItachClient extends EventEmitter {
 			this._pump(port)
 		}, timeout)
 
+		this._syncQueueExpiry(p)
 		this.emit('queue')
 	}
 
@@ -479,6 +549,7 @@ class ItachClient extends EventEmitter {
 		if (cmd.done) return
 		cmd.done = true
 		clearTimeout(cmd.expiryTimer)
+		cmd.expiryTimer = null
 		clearTimeout(cmd.completionTimer)
 
 		if (status === 'complete') this.stats.completed++

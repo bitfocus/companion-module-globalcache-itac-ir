@@ -19,7 +19,7 @@ module.exports = {
 		this.setVariableValues({
 			queue_depth: this.client.queueDepth(),
 			sent_total: stats.completed,
-			failed_total: stats.failed,
+			failed_total: stats.failed + this.invalidCount,
 			reconnects: stats.reconnects,
 		})
 	},

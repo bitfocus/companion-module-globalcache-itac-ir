@@ -18,7 +18,9 @@ test('parses device responses', () => {
 	assert.deepEqual(parseResponse('device,1,3 IR'), { type: 'device', module: 1, ports: 3, kind: 'IR' })
 	assert.equal(parseResponse('endlistdevices').type, 'endDevices')
 	assert.equal(parseResponse('stopir,1:1').type, 'stopped')
-	assert.deepEqual(parseResponse('710-1005-05'), { type: 'other', text: '710-1005-05' })
+	assert.deepEqual(parseResponse('710-1005-05'), { type: 'version', text: '710-1005-05' })
+	assert.deepEqual(parseResponse('version,0,3.0-12'), { type: 'version', text: '3.0-12' })
+	assert.deepEqual(parseResponse('IR,1:1,IR'), { type: 'other', text: 'IR,1:1,IR' })
 })
 
 test('splits lines across chunks and mixed terminators', () => {

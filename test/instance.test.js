@@ -103,6 +103,7 @@ test('instance connects, sends codes and reports results', async (t) => {
 	await instance.actions.portSet.callback({ options: { portNum: '1', ir: '38000,1,1,342,171,21', repeat: 0 } })
 	assert.equal(device.sendirs().length, 1)
 	assert.equal(instance.variables.last_result, 'invalid')
+	assert.equal(instance.variables.failed_total, 1)
 	assert.match(instance.variables.last_error, /on\/off pairs/)
 	assert.equal(instance.feedbacks.lastFailed.callback({ options: { portNum: '1' } }), true)
 	assert.equal(instance.feedbacks.lastFailed.callback({ options: { portNum: '2' } }), false)
@@ -115,6 +116,30 @@ test('instance connects, sends codes and reports results', async (t) => {
 	assert.equal(instance.variables.reconnects, 1)
 
 	assert.ok(Object.keys(instance.presets).length > 0)
+})
+
+test('a module warning clears when a later connection reports an IR module', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,0,0 ETHERNET', 'device,1,1 SERIAL']
+	await device.listen()
+	const Instance = loadInstanceClass()
+	const instance = new Instance({})
+	t.after(async () => {
+		await instance.destroy()
+		await device.close()
+	})
+
+	await instance.init({ host: '127.0.0.1', port: device.port, moduleAddress: 1 })
+	await waitFor(() => instance.statuses.at(-1)?.status === base.InstanceStatus.UnknownWarning)
+
+	device.devices = ['device,0,0 ETHERNET', 'device,1,3 IR']
+	const seen = instance.logs.length
+	await instance.actions.reconnect.callback()
+	await waitFor(() => instance.logs.slice(seen).some((entry) => entry.message.includes('1:IR(3)')))
+
+	assert.equal(instance.statuses.at(-1).status, base.InstanceStatus.Ok)
+	assert.equal(instance.variables.reconnects, 0)
+	assert.ok(!instance.logs.slice(seen).some((entry) => entry.message.startsWith('Disconnected')))
 })
 
 test('instance without an IP address reports bad config', async (t) => {

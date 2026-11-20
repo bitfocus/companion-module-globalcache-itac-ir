@@ -13,6 +13,8 @@ class FakeItach {
 		this.busyCount = 0 // answer the next N sendir with busyIR
 		this.errorCode = null // answer sendir with ERR_1:<port>,<code>
 		this.swallowSendir = false // never confirm sendir
+		this.portlessError = false // send ERR_<code> without a connector
+		this.rawReplies = {} // exact command line -> reply, for raw commands
 		this.devices = ['device,0,0 ETHERNET', 'device,1,3 IR']
 		this.timers = new Set()
 	}
@@ -69,12 +71,16 @@ class FakeItach {
 				this.busyCount--
 				return this._reply(socket, `busyIR,${mod}:${port},${id}`)
 			}
-			if (this.errorCode !== null) return this._reply(socket, `ERR_${mod}:${port},${this.errorCode}`)
+			if (this.errorCode !== null) {
+				const err = this.portlessError ? `ERR_${this.errorCode}` : `ERR_${mod}:${port},${this.errorCode}`
+				return this._reply(socket, err)
+			}
 			if (this.swallowSendir) return
 			return this._later(this.transmitMs, () => this._reply(socket, `completeir,${mod}:${port},${id}`))
 		}
 		if ((m = line.match(/^stopir,(\d+):(\d+)$/))) return this._reply(socket, line)
 
+		if (Object.prototype.hasOwnProperty.call(this.rawReplies, line)) return this._reply(socket, this.rawReplies[line])
 		this._reply(socket, 'ERR_01')
 	}
 
