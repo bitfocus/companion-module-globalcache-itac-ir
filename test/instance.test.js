@@ -65,6 +65,7 @@ test('instance connects, sends codes and reports results', async (t) => {
 	})
 
 	await instance.init({ host: '127.0.0.1', port: device.port, moduleAddress: 1 })
+	assert.ok(!instance.getConfigFields().some((field) => field.id === 'moduleAddress'))
 	await waitFor(() => host.variables.connection_status === 'Connected')
 	assert.equal(host.statuses.at(-1).status, InstanceStatus.Ok)
 	await waitFor(() => host.variables.firmware_version === '710-1005-05')
@@ -126,36 +127,37 @@ test('a module warning clears when a later connection reports an IR module', asy
 	const seen = host.logs.length
 	await host.actions.reconnect.callback()
 	await waitFor(() => host.logs.slice(seen).some((entry) => entry.message.includes('1:IR(3)')))
+	await waitFor(() => host.statuses.at(-1)?.status === InstanceStatus.Ok)
 
-	assert.equal(host.statuses.at(-1).status, InstanceStatus.Ok)
 	assert.equal(host.variables.reconnects, 0)
 	assert.ok(!host.logs.slice(seen).some((entry) => entry.message.startsWith('Disconnected')))
 })
 
 test('publishes an idle reconnect immediately and keeps discovered port choices', async (t) => {
 	const device = new FakeItach()
-	device.devices = ['device,0,0 ETHERNET', 'device,1,3 IR', 'device,4,2 IR']
+	device.devices = ['device,1,1 SERIAL', 'device,3,3 RELAY', 'device,5,3 IR', 'device,4,3 IR']
+	device.firmwareReply = 'version,0,3.0-12'
 	await device.listen()
 	const { instance, host } = createInstance(t)
 	t.after(async () => {
 		await instance.destroy()
 		await device.close()
 	})
-	await instance.init({ host: '127.0.0.1', port: device.port, moduleAddress: 4 })
+	await instance.init({ host: '127.0.0.1', port: device.port })
 	await waitFor(() => host.variables.connection_status === 'Connected')
 	const portOption = (definition) => definition.options.find((option) => option.id === 'portNum')
 	const setIrPort = portOption(host.actions.portSet)
 	assert.deepEqual(
 		setIrPort.choices.map((choice) => choice.id),
-		['1', '2'],
+		['1', '2', '3', '4', '5', '6'],
 	)
 	assert.equal(setIrPort.allowCustom, true)
 	assert.deepEqual(
 		portOption(host.feedbacks.portBusy).choices.map((choice) => choice.id),
-		['1', '2'],
+		['1', '2', '3', '4', '5', '6'],
 	)
-	assert.deepEqual(host.presetStructure[0].definitions[2].presets, ['send_2', 'hold_2', 'stop_2'])
-	assert.equal(host.presets.send_3, undefined)
+	assert.deepEqual(host.presetStructure[0].definitions[6].presets, ['send_6', 'hold_6', 'stop_6'])
+	assert.ok(host.variableDefinitions.port_6_mode)
 
 	device.dropAll()
 	await waitFor(() => host.variables.connection_status === 'Disconnected')
@@ -166,10 +168,20 @@ test('publishes an idle reconnect immediately and keeps discovered port choices'
 
 	await waitFor(() => host.variables.connection_status === 'Connected')
 	assert.equal(host.variables.reconnects, 1)
-	assert.equal(host.variables.firmware_version, '710-1005-05')
+	assert.equal(host.variables.firmware_version, '3.0-12')
 	assert.equal(portOption(host.actions.portSet), setIrPort, 'unchanged discovery retains definitions')
 	assert.equal(host.logs.filter((entry) => entry.message.startsWith('Device modules:')).length, 1)
-	assert.deepEqual(device.sendirs(), [])
+	await host.actions.portSet.callback({ options: { portNum: '1', ir: '38000,1,1,4,4', repeat: 0 } })
+	await host.actions.portSet.callback({ options: { portNum: '4', ir: '38000,1,1,4,4', repeat: 0 } })
+	assert.deepEqual(
+		device.sendirs().map((line) => line.split(',')[1]),
+		['4:1', '5:1'],
+	)
+
+	await instance.configUpdated({ host: '127.0.0.1', port: device.port, moduleAddress: 5 })
+	await waitFor(() => host.variables.connection_status === 'Connected')
+	await host.actions.portSet.callback({ options: { portNum: '1', ir: '38000,1,1,4,4', repeat: 0 } })
+	assert.match(device.sendirs().at(-1), /^sendir,5:1,/)
 })
 
 test('learns into both IR actions and publishes the actual connector modes', async (t) => {

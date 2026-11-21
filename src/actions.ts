@@ -31,7 +31,7 @@ export function UpdateActions(instance: GlobalCacheItachInstance): void {
 		choices: instance.portChoices,
 		allowCustom: true,
 		regex: '/^\\d+$/',
-		tooltip: 'Type a port number if it is not listed',
+		tooltip: 'Ports are numbered across the discovered IR modules',
 	}
 	const irOption: CompanionInputFieldTextInput<'ir'> = {
 		type: 'textinput',

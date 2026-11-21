@@ -2,7 +2,6 @@ import { Regex, type SomeCompanionConfigField } from '@companion-module/base'
 
 export const CONFIG_DEFAULTS = {
 	host: '',
-	moduleAddress: 1,
 	maxCommandAge: 3000,
 	retries: 3,
 	retryUncertain: false,
@@ -13,6 +12,8 @@ export const CONFIG_DEFAULTS = {
 export type ModuleConfig = typeof CONFIG_DEFAULTS & {
 	/** Retain explicitly saved ports for existing connections through TCP proxies. */
 	port?: number
+	/** Preserve the connector numbering of existing connections with a custom address. */
+	moduleAddress?: number
 }
 
 export function GetConfigFields(): SomeCompanionConfigField[] {
@@ -29,19 +30,8 @@ export function GetConfigFields(): SomeCompanionConfigField[] {
 			type: 'textinput',
 			id: 'host',
 			label: 'IP Address',
-			width: 9,
+			width: 12,
 			regex: Regex.IP,
-		},
-		{
-			type: 'number',
-			id: 'moduleAddress',
-			label: 'IR Module Address',
-			tooltip:
-				'Always 1 on an iTach. On a GC-100 use the module number of the IR ports (see the log after connecting).',
-			width: 3,
-			min: 0,
-			max: 255,
-			default: CONFIG_DEFAULTS.moduleAddress,
 		},
 		{
 			type: 'static-text',

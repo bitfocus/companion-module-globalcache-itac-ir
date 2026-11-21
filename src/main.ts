@@ -10,6 +10,7 @@ import {
 	type VariablesSchema,
 } from './variables.js'
 import { ITACH_TCP_PORT, ItachClient, type ClientState, type DeliveryResult, type StateInfo } from './itach.js'
+import { DEFAULT_PORT_COUNT } from './devices.js'
 
 export { UpgradeScripts } from './upgrades.js'
 
@@ -20,8 +21,6 @@ export type ModuleSchema = {
 	feedbacks: FeedbacksSchema
 	variables: VariablesSchema
 }
-
-const DEFAULT_PORT_COUNT = 3
 
 const STATE_LABELS = {
 	idle: 'Not configured',
@@ -80,23 +79,30 @@ export default class GlobalCacheItachInstance extends InstanceBase<ModuleSchema>
 
 		const previous = this.client.options
 		const port = cfg.port ?? ITACH_TCP_PORT
-		if (previous.host !== cfg.host || previous.port !== port || previous.moduleAddress !== cfg.moduleAddress) {
+		const preferredModule = cfg.moduleAddress === 1 ? undefined : cfg.moduleAddress
+		const sameDevice =
+			previous.host === cfg.host && previous.port === port && previous.preferredModule === preferredModule
+		const knownDevices = sameDevice ? this.client.devices : null
+		if (!sameDevice) {
 			this.lastDeviceInventory = undefined
 			this.lastDeviceProblem = undefined
 			this.setPortCount(DEFAULT_PORT_COUNT)
 		}
 		this.clientState = 'idle'
 		this.lastDisconnectMessage = undefined
-		this.client = new ItachClient({
-			host: cfg.host,
-			port,
-			moduleAddress: cfg.moduleAddress,
-			maxCommandAge: cfg.maxCommandAge,
-			retries: cfg.retries,
-			retryUncertain: cfg.retryUncertain,
-			keepaliveInterval: cfg.keepaliveInterval * 1000,
-			responseTimeout: cfg.responseTimeout,
-		})
+		this.client = new ItachClient(
+			{
+				host: cfg.host,
+				port,
+				preferredModule,
+				maxCommandAge: cfg.maxCommandAge,
+				retries: cfg.retries,
+				retryUncertain: cfg.retryUncertain,
+				keepaliveInterval: cfg.keepaliveInterval * 1000,
+				responseTimeout: cfg.responseTimeout,
+			},
+			knownDevices,
+		)
 		this.lastResult = undefined
 		this.lastResultByPort.clear()
 		this.invalidCount = 0
@@ -132,11 +138,7 @@ export default class GlobalCacheItachInstance extends InstanceBase<ModuleSchema>
 			this.lastDeviceProblem = problem
 			this.deviceWarning = problem
 
-			const count = devices.find((device) => device.module === cfg.moduleAddress)?.ports
-			if (!problem && count !== undefined && count >= 1 && count <= 255) this.setPortCount(count)
-			if (!this.client.connected) return
-			if (problem) this.updateStatus(InstanceStatus.UnknownWarning, problem)
-			else this.updateStatus(InstanceStatus.Ok)
+			this.setPortCount(this.client.portCount)
 		})
 		this.client.on('log', (level, message) => this.log(level, message))
 

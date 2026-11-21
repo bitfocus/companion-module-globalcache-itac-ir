@@ -26,6 +26,7 @@ import { learnIrCode } from './learner.js'
 import { EventEmitter } from 'node:events'
 import { parseResponse, LineSplitter, type DeviceError, type DeviceInfo } from './protocol.js'
 import { formatIrCode, transmitDurationMs, withRepeat, type IrCode } from './ircode.js'
+import { DEFAULT_PORT_COUNT, getIrConnectors } from './devices.js'
 
 export type ClientState = 'idle' | 'connecting' | 'connected' | 'disconnected'
 export type StateInfo = { manual?: boolean }
@@ -42,6 +43,7 @@ export interface DeliveryResult {
 
 type QueuedCommand = {
 	port: number
+	address?: string
 	code: IrCode
 	enqueuedAt: number
 	attempts: number
@@ -54,7 +56,7 @@ type QueuedCommand = {
 	hold?: { refreshMs: number; timer?: NodeJS.Timeout }
 }
 
-type InflightCommand = QueuedCommand & { id: number }
+type InflightCommand = QueuedCommand & { id: number; address: string }
 
 interface PortState {
 	queue: QueuedCommand[]
@@ -73,11 +75,11 @@ interface ClientEvents {
 }
 
 export const ITACH_TCP_PORT = 4998
+const DEFAULT_MODULE_ADDRESS = 1
 
 const DEFAULTS = {
 	host: '',
 	port: ITACH_TCP_PORT,
-	moduleAddress: 1,
 	connectTimeout: 5000,
 	reconnectMin: 1000,
 	reconnectMax: 5000,
@@ -92,17 +94,20 @@ const DEFAULTS = {
 	tickInterval: 250,
 }
 
+type ClientOptions = typeof DEFAULTS & { preferredModule?: number }
+
 const MAX_ID = 65535
 const HOLD_REPEATS = 3
 const NON_TRANSMITTING_MODES = new Set(['SENSOR', 'SENSOR_NOTIFY', 'LED_LIGHTING', 'SERIAL', 'RECEIVER'])
 
 export class ItachClient extends EventEmitter<ClientEvents> {
-	readonly options: typeof DEFAULTS
+	readonly options: ClientOptions
 	readonly stats = { sent: 0, completed: 0, failed: 0, reconnects: 0 }
 	state: ClientState = 'idle'
 	version = ''
-	devices: DeviceInfo[] | null = null
+	devices: DeviceInfo[] | null
 
+	private irConnectors: ReturnType<typeof getIrConnectors> | null
 	private running = false
 	private socket: Socket | null = null
 	private rawSocket?: Socket
@@ -125,9 +130,11 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	private stateMessage?: string
 	private manualReconnect = false
 
-	constructor(options?: Partial<typeof DEFAULTS>) {
+	constructor(options?: Partial<ClientOptions>, knownDevices: DeviceInfo[] | null = null) {
 		super()
 		this.options = { ...DEFAULTS, ...options }
+		this.devices = knownDevices
+		this.irConnectors = knownDevices && getIrConnectors(knownDevices, this.options.preferredModule)
 		this.reconnectDelay = this.options.reconnectMin
 	}
 
@@ -163,6 +170,24 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 	get connected(): boolean {
 		return this.state === 'connected'
+	}
+
+	get portCount(): number {
+		return this.irConnectors?.length ?? DEFAULT_PORT_COUNT
+	}
+
+	private _connectorAddress(port: number): string | undefined {
+		if (this.irConnectors) return this.irConnectors[port - 1]?.address
+		return `${this.options.preferredModule ?? DEFAULT_MODULE_ADDRESS}:${port}`
+	}
+
+	private _portForAddress(module: number, connector: number): number | undefined {
+		if (!this.irConnectors) {
+			return module === (this.options.preferredModule ?? DEFAULT_MODULE_ADDRESS) ? connector : undefined
+		}
+		const address = `${module}:${connector}`
+		const index = this.irConnectors.findIndex((item) => item.address === address)
+		return index === -1 ? undefined : index + 1
 	}
 
 	portMode(port: number): string | undefined {
@@ -211,6 +236,7 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		return new Promise((resolve) => {
 			const cmd: QueuedCommand = {
 				port,
+				address: this.irConnectors ? this._connectorAddress(port) : undefined,
 				code,
 				enqueuedAt: Date.now(),
 				attempts: 0,
@@ -222,6 +248,9 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 			}
 
 			if (!this.running) return this._finish(cmd, false, 'rejected', 'No device configured')
+			if (this.irConnectors && !cmd.address) {
+				return this._finish(cmd, false, 'rejected', `No IR connector for port ${port}`)
+			}
 			if (hold && (!this.connected || this.learner)) {
 				return this._finish(cmd, false, 'rejected', 'Cannot start a hold while disconnected or learning IR')
 			}
@@ -245,6 +274,8 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		this._cancelQueued(p, 'Cancelled by Stop IR')
 		this.emit('queue')
 		if (!this.connected || this.legacyRawTimer || this.learner) return false
+		const address = this._connectorAddress(port)
+		if (!address) return false
 		if (NON_TRANSMITTING_MODES.has(this.portModes.get(port) ?? '')) return false
 		if (p.stopTimer) return true
 
@@ -258,7 +289,7 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 			this.emit('log', 'warn', reason)
 			this._dropConnection(this.socket, reason)
 		}, this.options.responseTimeout)
-		this._write(`stopir,${this.options.moduleAddress}:${port}`)
+		this._write(`stopir,${address}`)
 		return true
 	}
 
@@ -358,7 +389,6 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 			socket.setNoDelay(true)
 			socket.setKeepAlive(true, 5000)
 			this.lastRx = Date.now()
-			this.devices = null
 			this.version = ''
 			this.legacyGc100 = false
 			this.pendingDevices = []
@@ -434,21 +464,32 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	}
 
 	private _finishDiscovery() {
+		if (this.discovery?.sawDeviceList) {
+			this.devices = this.pendingDevices
+			this.irConnectors = getIrConnectors(this.devices, this.options.preferredModule)
+		}
 		this.discovery = undefined
-		const device = this.devices?.find((device) => device.module === this.options.moduleAddress)
+		this.pendingDevices = []
+		if (this.devices) this.emit('devices', this.devices, this._checkDevices())
 		// Use a separate connection so a late mode error cannot settle a send.
 		// GC-100 only allows one TCP connection.
-		if (!this.legacyGc100 && device && /IR/.test(device.kind) && device.ports > 0 && device.ports <= 255) {
-			this._readPortModes(device)
+		if (!this.legacyGc100 && this.irConnectors?.length) {
+			this._readPortModes(this.irConnectors)
 		} else {
 			this._markConnected()
 		}
 	}
 
-	private _readPortModes(device: DeviceInfo) {
+	private _readPortModes(connectors: ReturnType<typeof getIrConnectors>) {
 		const socket = new Socket()
 		const splitter = new LineSplitter()
-		const pending = new Set(Array.from({ length: device.ports }, (_, index) => index + 1))
+		// A Flex three-output cable reports its shared configuration at port 1.
+		const pending = new Map<string, number[]>()
+		connectors.forEach(({ modeAddress }, index) => {
+			const ports = pending.get(modeAddress) ?? []
+			ports.push(index + 1)
+			pending.set(modeAddress, ports)
+		})
 		this.modeSocket = socket
 
 		const finish = () => {
@@ -460,16 +501,18 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		}
 		const timer = setTimeout(finish, this.options.responseTimeout)
 		socket.once('connect', () => {
-			for (const port of pending) socket.write(`get_IR,${device.module}:${port}\r`)
+			for (const address of pending.keys()) socket.write(`get_IR,${address}\r`)
 		})
 		socket.on('data', (chunk) => {
 			if (this.modeSocket !== socket) return
 			for (const line of splitter.push(chunk)) {
 				const response = parseResponse(line)
-				if (response.type === 'portMode' && response.module === device.module && pending.delete(response.port)) {
-					this.portModes.set(response.port, response.mode)
-				} else if (response.type === 'error' && response.module === device.module && response.port !== undefined) {
-					pending.delete(response.port)
+				if (response.type === 'portMode') {
+					const address = `${response.module}:${response.port}`
+					for (const port of pending.get(address) ?? []) this.portModes.set(port, response.mode)
+					pending.delete(address)
+				} else if (response.type === 'error') {
+					pending.delete(`${response.module}:${response.port}`)
 				}
 			}
 			if (!pending.size) finish()
@@ -599,22 +642,20 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 			case 'error':
 				return this._handleError(res, wasProbing)
 			case 'device':
-				this.pendingDevices.push(res)
+				if (this.discovery && !this.discovery.sawDeviceList) this.pendingDevices.push(res)
 				return
 			case 'endDevices':
-				this.devices = this.pendingDevices
-				this.pendingDevices = []
-				this.emit('devices', this.devices, this._checkDevices())
-				if (this.discovery) {
-					this.discovery.sawDeviceList = true
-					if (this.discovery.sawVersion) this._finishDiscovery()
-				}
+				if (!this.discovery) return
+				this.discovery.sawDeviceList = true
+				if (this.discovery.sawVersion) this._finishDiscovery()
 				return
 			case 'portMode':
 				return
-			case 'stopped':
-				if (res.module === this.options.moduleAddress) this._handleStopped(res.port)
+			case 'stopped': {
+				const port = this._portForAddress(res.module, res.port)
+				if (port !== undefined) this._handleStopped(port)
 				return
+			}
 			case 'version':
 				if (!this.version && res.module !== undefined && !res.text.startsWith('710-')) this.legacyGc100 = true
 				if (this.version !== res.text) {
@@ -653,15 +694,20 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 		const invalidModule = res.module === 0 && res.port === 0 && res.code === 2
 		let affected: [number, PortState][] = []
-		if (invalidModule) {
-			// Every managed IR command on this connection targets the same invalid module.
-			affected = [...this.ports].filter(([, p]) => p.inflight || p.stopTimer)
-		} else if (res.module === this.options.moduleAddress && res.port !== undefined && res.port > 0) {
-			const p = this.ports.get(res.port)
-			if (p) affected = [[res.port, p]]
+		if (res.module !== undefined && res.port !== undefined && res.port > 0) {
+			const port = this._portForAddress(res.module, res.port)
+			if (port !== undefined) {
+				const p = this.ports.get(port)
+				if (p?.inflight || p?.stopTimer) affected = [[port, p]]
+			}
 		} else if (!wasProbing && (res.port === undefined || (res.module === 0 && res.port === 0))) {
 			const candidates = [...this.ports].filter(([, p]) => p.inflight || p.stopTimer)
 			if (candidates.length === 1) affected = candidates
+			else if (invalidModule) {
+				// The device omits the failed module. Only settle the group if they all target it.
+				const modules = new Set(candidates.map(([port]) => this._connectorAddress(port)?.split(':')[0]))
+				if (modules.size === 1) affected = candidates
+			}
 		}
 		if (!affected.length) {
 			this.emit('log', 'warn', `Device reported: ${message}`)
@@ -691,19 +737,17 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	}
 
 	private _checkDevices() {
-		const { moduleAddress } = this.options
-		const found = this.devices?.find((d) => d.module === moduleAddress)
-		if (!found) {
-			const list = this.devices?.map((d) => `${d.module}:${d.kind}`).join(', ') || 'none'
-			return `No module at address ${moduleAddress} (device reports: ${list})`
-		}
-		if (!/IR/.test(found.kind)) return `Module ${moduleAddress} is ${found.kind}, not an IR module`
-		return null
+		if (this.portCount) return null
+		const { preferredModule } = this.options
+		if (preferredModule !== undefined)
+			return `No IR connectors at the previously configured module address ${preferredModule}`
+		return 'Device reports no IR connectors'
 	}
 
 	private _inflightFor(module: number, port: number, id: number) {
-		if (module !== this.options.moduleAddress) return null
-		const p = this.ports.get(port)
+		const logicalPort = this._portForAddress(module, port)
+		if (logicalPort === undefined) return null
+		const p = this.ports.get(logicalPort)
 		return p?.inflight && p.inflight.id === id ? p.inflight : null
 	}
 
@@ -800,24 +844,30 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		this._syncQueueExpiry(p)
 		if (!this.connected || p.inflight || p.waiting || p.stopTimer || this.legacyRawTimer || this.learner) return
 
+		const address = this._connectorAddress(port)
+		const mode = this.portModes.get(port)
 		let queued = p.queue.shift()
 		while (queued) {
 			this._pauseExpiry(queued)
 			if (queued.ageRemaining <= 0) {
 				this._expire(queued)
-			} else {
-				const mode = this.portModes.get(port)
-				if (!mode || !NON_TRANSMITTING_MODES.has(mode)) break
+			} else if (!address) {
+				this._finish(queued, false, 'rejected', `No IR connector for port ${port}`)
+			} else if (queued.address && queued.address !== address) {
+				this._finish(queued, false, 'rejected', `The IR connector for port ${port} changed while the code was queued`)
+			} else if (mode && NON_TRANSMITTING_MODES.has(mode)) {
 				this._finish(queued, false, 'rejected', `Port ${port} is in ${mode} mode and cannot transmit IR`)
+			} else {
+				break
 			}
 			queued = p.queue.shift()
 		}
-		if (!queued) {
+		if (!queued || !address) {
 			this.emit('queue')
 			return
 		}
 
-		const cmd: InflightCommand = Object.assign(queued, { id: this.nextId })
+		const cmd: InflightCommand = Object.assign(queued, { id: this.nextId, address })
 		this.nextId = this.nextId >= MAX_ID ? 1 : this.nextId + 1
 		cmd.attempts++
 		p.inflight = cmd
@@ -828,8 +878,8 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	}
 
 	private _transmit(cmd: InflightCommand, p: PortState) {
-		const { moduleAddress, completionMargin } = this.options
-		this._write(`sendir,${moduleAddress}:${cmd.port},${cmd.id},${formatIrCode(cmd.code)}`)
+		const { completionMargin } = this.options
+		this._write(`sendir,${cmd.address},${cmd.id},${formatIrCode(cmd.code)}`)
 		this.stats.sent++
 
 		const timeout = Math.ceil(transmitDurationMs(cmd.code)) + completionMargin

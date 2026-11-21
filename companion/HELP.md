@@ -1,12 +1,14 @@
 ## Global Caché iTach IR
 
-Control projectors, displays and other IR devices through a Global Caché iTach IP2IR or WF2IR. Other Global Caché units that speak the same TCP API (GC-100, Flex) should also work by setting the IR module address.
+Control projectors, displays and other IR devices through a Global Caché iTach IP2IR or WF2IR. The module also discovers IR connectors on GC-100 and Flex units.
 
 ### Setup
 
 1. Enter the **IP address** of the iTach. Find it with the iHelp utility or in your router's DHCP client list. Give the iTach a fixed IP or a DHCP reservation so it can't move.
-2. Leave **IR Module Address** at 1 for an iTach. The module connects on TCP port 4998.
-3. After connecting, the log lists the modules the device reports. The selected IR module’s port count determines the port choices and presets. You can still enter a port number manually. If the module address doesn't point to an IR module, the connection shows a warning. On an iTach, the module also reads each connector’s mode and rejects IR sends to connectors configured as inputs or for LED lighting.
+2. The module connects on TCP port 4998 and lists the modules the device reports in the log.
+3. Companion numbers ports from 1 across the discovered IR modules in module address order. On an iTach, ports 1–3 map to `1:1`–`1:3`. On a GC-100-12, ports 1–3 map to `4:1`–`4:3` and ports 4–6 map to `5:1`–`5:3`. Existing connections with a saved custom module address list that module’s connectors first to preserve saved button assignments.
+
+On an iTach, Companion also reads the connector modes and rejects sends to connectors configured as inputs or for LED lighting. If discovery times out, Companion uses the last known port assignments, or the standard iTach addresses for a new connection.
 
 ### Capturing IR codes
 

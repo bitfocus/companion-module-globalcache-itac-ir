@@ -33,8 +33,7 @@ async function waitFor(check, timeout = 2000) {
 	}
 }
 
-async function setup(t, options = {}) {
-	const device = new FakeItach()
+async function setup(t, options = {}, device = new FakeItach()) {
 	await device.listen()
 	const client = new ItachClient({ ...FAST, host: '127.0.0.1', port: device.port, ...options })
 	client.on('error', () => {})
@@ -97,7 +96,7 @@ test('holds the queue until device discovery completes', { timeout: 4000 }, asyn
 })
 
 test(
-	'falls back to configured ports when firmware answers but the device list is unavailable',
+	'falls back to standard iTach ports when firmware answers but the device list is unavailable',
 	{ timeout: 4000 },
 	async (t) => {
 		const device = new FakeItach()
@@ -160,7 +159,7 @@ test(
 	},
 )
 
-test('warns when there is no IR module at the configured address', async (t) => {
+test('warns and rejects IR commands when the device reports no IR connectors', async (t) => {
 	const device = new FakeItach()
 	device.devices = ['device,0,0 ETHERNET', 'device,1,1 SERIAL']
 	await device.listen()
@@ -172,7 +171,96 @@ test('warns when there is no IR module at the configured address', async (t) => 
 	const devices = once(client, 'devices')
 	client.start()
 	const [, problem] = await devices
-	assert.match(problem, /SERIAL, not an IR module/)
+	assert.match(problem, /Device reports no IR connectors/)
+	const result = await client.sendIR(1, CODE)
+	assert.equal(result.status, 'rejected')
+	assert.deepEqual(device.sendirs(), [])
+})
+
+test('routes mode queries, transmissions and replies by full connector address', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,0,0 MODULE', 'device,4,2 IR_OUT', 'device,5,2 IR']
+	device.portModes = { '4:1': 'IR_BLASTER', '5:2': 'SENSOR' }
+	const { client } = await setup(t, { completionMargin: 500 }, device)
+	assert.deepEqual(
+		[1, 2, 3, 4].map((port) => client.portMode(port)),
+		['IR_BLASTER', 'IR', 'IR', 'SENSOR'],
+	)
+	assert.equal((await client.sendIR(4, CODE)).status, 'rejected')
+
+	device.swallowSendir = true
+	device.ignoreStop = true
+	const socket = [...device.sockets][0]
+	const first = client.sendIR(1, CODE)
+	const second = client.sendIR(3, CODE)
+	await waitFor(() => device.sendirs().length === 2)
+	const [, , secondId] = device.sendirs()[1].split(',')
+	device._reply(socket, 'ERR_0:0,002')
+	device._reply(socket, `busyIR,4:1,${secondId}`)
+	device._reply(socket, `completeir,4:1,${secondId}`)
+	device._reply(socket, 'ERR_4:1,008')
+	assert.equal((await first).status, 'error')
+	assert.equal(client.isPortBusy(3), true)
+	assert.equal(client.stopIR(3), true)
+	await waitFor(() => device.received.includes('stopir,5:1'))
+	device._reply(socket, 'stopir,4:1')
+	device._reply(socket, 'stopir,5:1')
+	assert.equal((await second).status, 'stopped')
+	assert.equal(device.sendirs().length, 2)
+})
+
+test('keeps saved custom module ports first and rejects sends if that module disappears', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,1,3 IR', 'device,4,2 IR']
+	const { client } = await setup(t, { preferredModule: 4 }, device)
+	assert.equal((await client.sendIR(1, CODE)).status, 'complete')
+	assert.equal((await client.sendIR(3, CODE)).status, 'complete')
+	assert.deepEqual(
+		device.sendirs().map((line) => line.split(',')[1]),
+		['4:1', '1:1'],
+	)
+
+	device.devices.pop()
+	const inventory = once(client, 'devices')
+	client.reconnect()
+	const [, problem] = await inventory
+	assert.match(problem, /previously configured module address 4/)
+	assert.equal((await client.sendIR(1, CODE)).status, 'rejected')
+	assert.equal(device.sendirs().length, 2)
+})
+
+test('keeps the discovered address through incomplete discovery and rejects queued sends when it changes', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,4,3 IR']
+	const { client } = await setup(t, {}, device)
+
+	device.ignoreDeviceList = true
+	client.reconnect()
+	assert.equal((await client.sendIR(1, CODE)).status, 'complete')
+	assert.match(device.sendirs()[0], /^sendir,4:1,/)
+
+	device.devices = ['device,1,3 IR']
+	device.ignoreDeviceList = false
+	client.reconnect()
+	const result = await client.sendIR(1, CODE)
+	assert.equal(result.status, 'rejected')
+	assert.match(result.error, /connector for port 1 changed/)
+	assert.equal(device.sendirs().length, 1)
+})
+
+test('discovers three Flex cable outputs from its shared mode connector', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,0,0 ETHERNET', 'device,1,1 IRTRIPORT_BLASTER']
+	device.portModes['1:1'] = 'IRTRIPORT_BLASTER'
+	const { client } = await setup(t, {}, device)
+	assert.equal(client.portCount, 3)
+	assert.deepEqual(
+		device.received.filter((line) => line.startsWith('get_IR,')),
+		['get_IR,1:1'],
+	)
+	assert.equal(client.portMode(3), 'IRTRIPORT_BLASTER')
+	assert.equal((await client.sendIR(3, CODE)).status, 'complete')
+	assert.match(device.sendirs()[0], /^sendir,1:3,/)
 })
 
 test('codes on the same port wait for the previous one to finish', async (t) => {
@@ -448,7 +536,7 @@ test(
 )
 
 test('the documented invalid module error settles all affected sends without retrying', async (t) => {
-	const { device, client } = await setup(t, { moduleAddress: 5, retryUncertain: true })
+	const { device, client } = await setup(t, { retryUncertain: true })
 	device.swallowSendir = true
 	const first = client.sendIR(1, CODE)
 	const second = client.sendIR(2, CODE)
