@@ -1,21 +1,25 @@
-const { combineRgb } = require('@companion-module/base')
-const { PORT_CHOICES, toPort } = require('./actions')
+import { combineRgb } from '@companion-module/base'
+import { toPort } from './actions.js'
+import type GlobalCacheItachInstance from './main.js'
 
-module.exports = {
-	initFeedbacks: function () {
-		let self = this
-		let feedbacks = {}
+export type FeedbacksSchema = {
+	connected: { type: 'boolean'; options: Record<string, never> }
+	portBusy: { type: 'boolean'; options: { portNum: string } }
+	lastFailed: { type: 'boolean'; options: { portNum: string } }
+}
 
-		feedbacks.connected = {
+export function UpdateFeedbacks(instance: GlobalCacheItachInstance): void {
+	instance.setFeedbackDefinitions({
+		connected: {
 			type: 'boolean',
 			name: 'Device connected',
 			description: 'True while the connection to the device is up and responding',
 			defaultStyle: { bgcolor: combineRgb(0, 153, 0), color: combineRgb(255, 255, 255) },
 			options: [],
-			callback: () => self.client.connected,
-		}
+			callback: () => instance.client.connected,
+		},
 
-		feedbacks.portBusy = {
+		portBusy: {
 			type: 'boolean',
 			name: 'Port sending',
 			description: 'True while a code is transmitting or queued on the port',
@@ -26,18 +30,18 @@ module.exports = {
 					label: 'Port',
 					id: 'portNum',
 					default: '1',
-					choices: PORT_CHOICES,
+					choices: instance.portChoices,
 					allowCustom: true,
 					regex: '/^\\d+$/',
 				},
 			],
 			callback: (feedback) => {
 				const port = toPort(feedback.options.portNum)
-				return port !== undefined && self.client.isPortBusy(port)
+				return port !== undefined && instance.client.isPortBusy(port)
 			},
-		}
+		},
 
-		feedbacks.lastFailed = {
+		lastFailed: {
 			type: 'boolean',
 			name: 'Last code failed',
 			description: 'True when the most recent code on the port (or any port) was not confirmed as sent',
@@ -48,20 +52,21 @@ module.exports = {
 					label: 'Port',
 					id: 'portNum',
 					default: 'any',
-					choices: [{ id: 'any', label: 'Any port' }, ...PORT_CHOICES],
+					choices: [{ id: 'any', label: 'Any port' }, ...instance.portChoices],
 					allowCustom: true,
 					regex: '/^(any|\\d+)$/',
 				},
 			],
 			callback: (feedback) => {
+				const port = toPort(feedback.options.portNum)
 				const result =
 					feedback.options.portNum === 'any'
-						? self.lastResult
-						: self.lastResultByPort.get(toPort(feedback.options.portNum))
+						? instance.lastResult
+						: port === undefined
+							? undefined
+							: instance.lastResultByPort.get(port)
 				return result !== undefined && !result.ok
 			},
-		}
-
-		self.setFeedbackDefinitions(feedbacks)
-	},
+		},
+	})
 }

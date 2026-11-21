@@ -1,16 +1,24 @@
 ## Global Caché iTach IR
 
-Control projectors, displays and other IR devices through a Global Caché iTach IP2IR or WF2IR. Other Global Caché units that speak the same TCP API (GC-100, Flex) should also work by setting the IR module address.
+Control projectors, displays and other IR devices through a Global Caché iTach IP2IR or WF2IR. The module also discovers IR connectors on GC-100 and Flex units.
 
 ### Setup
 
 1. Enter the **IP address** of the iTach. Find it with the iHelp utility or in your router's DHCP client list. Give the iTach a fixed IP or a DHCP reservation so it can't move.
-2. Leave **TCP Port** at 4998 and **IR Module Address** at 1 for an iTach.
-3. After connecting, the log lists the modules the device reports. If the module address doesn't point to an IR module, the connection shows a warning.
+2. The module connects on TCP port 4998 and lists the modules the device reports in the log.
+3. Companion numbers ports from 1 across the discovered IR modules in module address order. On an iTach, ports 1–3 map to `1:1`–`1:3`. On a GC-100-12, ports 1–3 map to `4:1`–`4:3` and ports 4–6 map to `5:1`–`5:3`. Existing connections with a saved custom module address list that module’s connectors first to preserve saved button assignments.
+
+On an iTach, Companion also reads the connector modes and rejects sends to connectors configured as inputs or for LED lighting. If discovery times out, Companion uses the last known port assignments, or the standard iTach addresses for a new connection.
 
 ### Capturing IR codes
 
-Download the free iLearn and iHelp utilities from [Global Caché Support Downloads](https://www.globalcache.com/downloads/). Mac versions are available from [http://www.rmartijnr.eu/](http://www.rmartijnr.eu/).
+1. Add a **Send IR code** or **Start IR hold** action and click **Learn Values**.
+2. Hold the remote within about an inch (2.5 cm) of the iTach’s onboard learner and press the button you want to capture.
+3. Review the captured **IR Code**. Learning updates only that field, so your selected port and repeat settings stay in place.
+
+Learn on an idle connection. LED lighting mode can make the iTach learner unavailable.
+
+You can also use iLearn to capture and paste a code. Download the free iLearn and iHelp utilities from [Global Caché Support Downloads](https://www.globalcache.com/downloads/). Mac versions are available from [http://www.rmartijnr.eu/](http://www.rmartijnr.eu/).
 
 1. Select the device type you're learning from in the IR Learner dropdown menu (Autodetect Type).
 2. Enter the IP address of the Global Caché device and press **Connect**.
@@ -23,7 +31,7 @@ Download the free iLearn and iHelp utilities from [Global Caché Support Downloa
 
 Paste the code into the **Send IR code** action. These formats are accepted:
 
-- Global Caché code: `38000,1,1,342,171,21,64,...`
+- Global Caché code (numeric or compressed): `38000,1,1,342,171,21,64,...`
 - The full line from iLearn, including the header: `sendir,1:1,1,38000,1,1,...` (the header is removed automatically)
 - Learned Pronto hex: `0000 006D 0022 0002 ...`
 
@@ -34,12 +42,13 @@ Codes saved with earlier versions of this module keep working. Spaces and line b
 ### Actions
 
 - **Send IR code**: transmits a code on a port. The action completes once the iTach confirms the code was sent, so in a sequential action group the next step waits for it. Use _Repeat count_ for devices that need a code sent more than once to react.
-- **Stop IR**: stops the code transmitting on a port and discards any waiting codes.
+- **Start IR hold**: sends short IR bursts for as long as the button is held. Pair it with **Stop IR** on release.
+- **Stop IR**: discards waiting codes and asks the device to stop the active transmission. The module waits for the device’s acknowledgment. A device that does not acknowledge the stop, such as a GC-100, causes the module to reconnect.
 - **Clear queued codes**: discards codes waiting on every port.
 - **Reconnect**: drops and re-opens the connection.
-- **Send raw command (advanced)**: sends any Global Caché API command, e.g. `get_IR,1:1`.
+- **Send raw command (advanced)**: sends a Global Caché API command. On a GC-100, wait for IR delivery to finish before sending a raw command. Find replies in the module log.
 
-**Hold to repeat (e.g. volume):** add _Send IR code_ with a repeat count of 50 on press and _Stop IR_ on release. The **Hold to repeat** presets are set up this way.
+**Hold to repeat (e.g. volume):** use _Start IR hold_ on press and _Stop IR_ on release. The module refreshes a burst of three repeats while held. If the connection drops, the device can finish the remaining repeats in the last burst. Release and press the button again after reconnecting. For an older copied preset, replace its press action with _Start IR hold_ and keep the same IR code and release action.
 
 ### How delivery works
 
@@ -50,16 +59,16 @@ Codes saved with earlier versions of this module keep working. Spaces and line b
 
 ### Recovery
 
-- The connection is retried automatically, every second at first and backing off to every 5 seconds, until the device is back.
+- The connection is retried automatically, every second at first and backing off to every 5 seconds, until the device is back. Queued sends wait for identification and still expire according to **Discard codes not started within**.
 - An idle connection is checked every 10 seconds by default (**Connection check interval**). This catches a device that lost power or network without closing the connection, so it reconnects before the next button press instead of failing.
 - A missing confirmation also triggers an immediate connection check.
 
 ### Feedbacks and variables
 
 - **Device connected**, **Port sending**, and **Last code failed** feedbacks.
-- Variables: `connection_status`, `firmware_version`, `queue_depth`, `last_port`, `last_result`, `last_error`, `last_latency_ms`, `sent_total`, `failed_total`, `reconnects`.
+- Variables: `connection_status`, `firmware_version`, `queue_depth`, `last_port`, `last_result`, `last_error`, `last_latency_ms`, `sent_total`, `failed_total`, `reconnects`, and `port_N_mode` for each discovered connector. Mode values are empty until the device responds.
 
-The **Status** preset shows the connection state, turns red when a code fails, and reconnects when pressed.
+The **Status** preset shows the connection state, turns red when a code fails, and reconnects when pressed. Each port has a group containing its **Send**, **Hold to repeat**, and **Stop** presets.
 
 ### Troubleshooting
 

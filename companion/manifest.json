@@ -1,4 +1,6 @@
 {
+	"$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
+	"type": "connection",
 	"id": "globalcache-itac-ir",
 	"name": "globalcache-itac-ir",
 	"shortname": "ip2ir",
@@ -21,13 +23,13 @@
 			"email": "mike@emmauschurch.com"
 		}
 	],
-	"legacyIds": [],
 	"runtime": {
-		"type": "node22",
+		"type": "node26",
 		"api": "nodejs-ipc",
 		"apiVersion": "0.0.0",
-		"entrypoint": "../index.js"
+		"entrypoint": "../dist/main.js"
 	},
+	"legacyIds": [],
 	"manufacturer": "Global Cache",
 	"products": ["iTach IP2IR", "iTach WF2IR"],
 	"keywords": ["IR", "Infrared", "Remote", "Projector", "Display"]

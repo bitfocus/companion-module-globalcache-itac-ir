@@ -1,9 +1,9 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { once } = require('node:events')
-const { ItachClient } = require('../src/itach')
-const { parseIrCode } = require('../src/ircode')
-const { FakeItach } = require('./fake-itach')
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { once } from 'node:events'
+import { ItachClient } from '../dist/itach.js'
+import { parseIrCode } from '../dist/ircode.js'
+import { FakeItach } from './fake-itach.js'
 
 const CODE = parseIrCode('38000,1,1,342,171,21,64,21,21,21,1520')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -25,8 +25,15 @@ async function waitForState(client, state) {
 	while (client.state !== state) await once(client, 'state')
 }
 
-async function setup(t, options = {}) {
-	const device = new FakeItach()
+async function waitFor(check, timeout = 2000) {
+	const started = Date.now()
+	while (!check()) {
+		if (Date.now() - started >= timeout) assert.fail('Timed out waiting for the test device')
+		await sleep(5)
+	}
+}
+
+async function setup(t, options = {}, device = new FakeItach()) {
 	await device.listen()
 	const client = new ItachClient({ ...FAST, host: '127.0.0.1', port: device.port, ...options })
 	client.on('error', () => {})
@@ -67,7 +74,92 @@ test('identifies the device on connect', async (t) => {
 	assert.equal(problem, null)
 })
 
-test('warns when there is no IR module at the configured address', async (t) => {
+test('holds the queue until device discovery completes', { timeout: 4000 }, async (t) => {
+	const device = new FakeItach()
+	device.ignoreDeviceList = true
+	await device.listen()
+	const client = new ItachClient({ ...FAST, host: '127.0.0.1', port: device.port, responseTimeout: 1000 })
+	t.after(async () => {
+		client.stop()
+		await device.close()
+	})
+	const version = once(client, 'version')
+	client.start()
+	await version
+	const pending = client.sendIR(1, CODE)
+
+	assert.equal(client.state, 'connecting')
+	assert.equal(device.sendirs().length, 0)
+	device._replyWithDevices([...device.sockets][0])
+	assert.equal((await pending).status, 'complete')
+	assert.equal(device.sendirs().length, 1)
+})
+
+test(
+	'falls back to standard iTach ports when firmware answers but the device list is unavailable',
+	{ timeout: 4000 },
+	async (t) => {
+		const device = new FakeItach()
+		device.ignoreDeviceList = true
+		await device.listen()
+		const client = new ItachClient({ ...FAST, host: '127.0.0.1', port: device.port })
+		t.after(async () => {
+			client.stop()
+			await device.close()
+		})
+		client.start()
+
+		const result = await client.sendIR(1, CODE)
+		assert.equal(result.status, 'complete')
+		assert.equal(client.version, '710-1005-05')
+		assert.equal(client.devices, null)
+		assert.equal(device.sendirs().length, 1)
+	},
+)
+
+test('a silent TCP connection leaves queued IR for the next responsive connection', { timeout: 4000 }, async (t) => {
+	const { device, client } = await setup(t)
+	device.silent = true
+	device.dropAll()
+	await waitForState(client, 'disconnected')
+	const pending = client.sendIR(1, CODE)
+	await waitForState(client, 'connecting')
+	await waitForState(client, 'disconnected')
+	assert.equal(device.sendirs().length, 0)
+	assert.equal(client.queueDepth(), 1)
+
+	device.silent = false
+	assert.equal((await pending).status, 'complete')
+	assert.equal(device.sendirs().length, 1)
+})
+
+test(
+	'discovery cannot send a queued code past its deadline before the expiry timer runs',
+	{ timeout: 4000 },
+	async (t) => {
+		const device = new FakeItach()
+		device.ignoreDeviceList = true
+		await device.listen()
+		const client = new ItachClient({ ...FAST, host: '127.0.0.1', port: device.port, responseTimeout: 2000 })
+		t.after(async () => {
+			client.stop()
+			await device.close()
+		})
+		const version = once(client, 'version')
+		client.start()
+		await version
+		const now = Date.now()
+		const clock = t.mock.method(Date, 'now', () => now)
+		const pending = client.sendIR(1, CODE)
+		clock.mock.mockImplementation(() => now + FAST.maxCommandAge + 1)
+		device._replyWithDevices([...device.sockets][0])
+
+		assert.equal((await pending).status, 'expired')
+		assert.equal(device.sendirs().length, 0)
+	},
+)
+
+test('warns and rejects IR commands when the device reports no IR connectors', async (t) => {
 	const device = new FakeItach()
 	device.devices = ['device,0,0 ETHERNET', 'device,1,1 SERIAL']
 	await device.listen()
@@ -79,7 +171,96 @@ test('warns when there is no IR module at the configured address', async (t) => 
 	const devices = once(client, 'devices')
 	client.start()
 	const [, problem] = await devices
-	assert.match(problem, /SERIAL, not an IR module/)
+	assert.match(problem, /Device reports no IR connectors/)
+	const result = await client.sendIR(1, CODE)
+	assert.equal(result.status, 'rejected')
+	assert.deepEqual(device.sendirs(), [])
+})
+
+test('routes mode queries, transmissions and replies by full connector address', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,0,0 MODULE', 'device,4,2 IR_OUT', 'device,5,2 IR']
+	device.portModes = { '4:1': 'IR_BLASTER', '5:2': 'SENSOR' }
+	const { client } = await setup(t, { completionMargin: 500 }, device)
+	assert.deepEqual(
+		[1, 2, 3, 4].map((port) => client.portMode(port)),
+		['IR_BLASTER', 'IR', 'IR', 'SENSOR'],
+	)
+	assert.equal((await client.sendIR(4, CODE)).status, 'rejected')
+
+	device.swallowSendir = true
+	device.ignoreStop = true
+	const socket = [...device.sockets][0]
+	const first = client.sendIR(1, CODE)
+	const second = client.sendIR(3, CODE)
+	await waitFor(() => device.sendirs().length === 2)
+	const [, , secondId] = device.sendirs()[1].split(',')
+	device._reply(socket, 'ERR_0:0,002')
+	device._reply(socket, `busyIR,4:1,${secondId}`)
+	device._reply(socket, `completeir,4:1,${secondId}`)
+	device._reply(socket, 'ERR_4:1,008')
+	assert.equal((await first).status, 'error')
+	assert.equal(client.isPortBusy(3), true)
+	assert.equal(client.stopIR(3), true)
+	await waitFor(() => device.received.includes('stopir,5:1'))
+	device._reply(socket, 'stopir,4:1')
+	device._reply(socket, 'stopir,5:1')
+	assert.equal((await second).status, 'stopped')
+	assert.equal(device.sendirs().length, 2)
+})
+
+test('keeps saved custom module ports first and rejects sends if that module disappears', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,1,3 IR', 'device,4,2 IR']
+	const { client } = await setup(t, { preferredModule: 4 }, device)
+	assert.equal((await client.sendIR(1, CODE)).status, 'complete')
+	assert.equal((await client.sendIR(3, CODE)).status, 'complete')
+	assert.deepEqual(
+		device.sendirs().map((line) => line.split(',')[1]),
+		['4:1', '1:1'],
+	)
+
+	device.devices.pop()
+	const inventory = once(client, 'devices')
+	client.reconnect()
+	const [, problem] = await inventory
+	assert.match(problem, /previously configured module address 4/)
+	assert.equal((await client.sendIR(1, CODE)).status, 'rejected')
+	assert.equal(device.sendirs().length, 2)
+})
+
+test('keeps the discovered address through incomplete discovery and rejects queued sends when it changes', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,4,3 IR']
+	const { client } = await setup(t, {}, device)
+
+	device.ignoreDeviceList = true
+	client.reconnect()
+	assert.equal((await client.sendIR(1, CODE)).status, 'complete')
+	assert.match(device.sendirs()[0], /^sendir,4:1,/)
+
+	device.devices = ['device,1,3 IR']
+	device.ignoreDeviceList = false
+	client.reconnect()
+	const result = await client.sendIR(1, CODE)
+	assert.equal(result.status, 'rejected')
+	assert.match(result.error, /connector for port 1 changed/)
+	assert.equal(device.sendirs().length, 1)
+})
+
+test('discovers three Flex cable outputs from its shared mode connector', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,0,0 ETHERNET', 'device,1,1 IRTRIPORT_BLASTER']
+	device.portModes['1:1'] = 'IRTRIPORT_BLASTER'
+	const { client } = await setup(t, {}, device)
+	assert.equal(client.portCount, 3)
+	assert.deepEqual(
+		device.received.filter((line) => line.startsWith('get_IR,')),
+		['get_IR,1:1'],
+	)
+	assert.equal(client.portMode(3), 'IRTRIPORT_BLASTER')
+	assert.equal((await client.sendIR(3, CODE)).status, 'complete')
+	assert.match(device.sendirs()[0], /^sendir,1:3,/)
 })
 
 test('codes on the same port wait for the previous one to finish', async (t) => {
@@ -246,6 +427,144 @@ test('Stop IR cancels queued codes and stops the port', async (t) => {
 	assert.equal(client.queueDepth(), 0)
 })
 
+test('Stop IR waits for the device acknowledgement and gates later sends', async (t) => {
+	const { device, client } = await setup(t)
+	device.swallowSendir = true
+	device.stopDelayMs = 100
+	let stopped
+	const active = client.sendIR(1, CODE).then((result) => {
+		stopped = result
+		return result
+	})
+	await waitFor(() => device.sendirs().length === 1)
+
+	assert.equal(client.stopIR(1), true)
+	device.swallowSendir = false
+	const next = client.sendIR(1, CODE)
+	await waitFor(() => device.received.includes('stopir,1:1'))
+	assert.equal(stopped, undefined)
+	assert.equal(device.sendirs().length, 1)
+	assert.equal((await active).status, 'stopped')
+	assert.equal((await next).status, 'complete')
+	assert.equal(device.sendirs().length, 2)
+})
+
+test('an external stop acknowledgement settles the active send and advances its port queue', async (t) => {
+	const { device, client } = await setup(t, { retryUncertain: true })
+	device.swallowSendir = true
+	const active = client.sendIR(1, CODE)
+	const next = client.sendIR(1, CODE)
+	await waitFor(() => device.sendirs().length === 1)
+	device.swallowSendir = false
+	device._reply([...device.sockets][0], 'stopir,1:1')
+
+	assert.equal((await active).status, 'stopped')
+	assert.equal((await next).status, 'complete')
+	assert.equal(device.sendirs().length, 2)
+})
+
+test('an unacknowledged local stop never retransmits the interrupted code', async (t) => {
+	const { device, client } = await setup(t, { retryUncertain: true })
+	device.swallowSendir = true
+	device.ignoreStop = true
+	const active = client.sendIR(1, CODE)
+	await waitFor(() => device.sendirs().length === 1)
+	assert.equal(client.stopIR(1), true)
+
+	const result = await active
+	assert.equal(result.status, 'uncertain')
+	assert.match(result.error, /Stop IR was not acknowledged/)
+	await waitForState(client, 'connected')
+	assert.equal(device.sendirs().length, 1)
+})
+
+test('a hold refreshes the same short burst and stops refreshing on release', async (t) => {
+	const { device, client } = await setup(t)
+	device.swallowSendir = true
+	const settled = once(client, 'result')
+	client.startHold(1, parseIrCode('38000,1,1,4,950'))
+	await waitFor(() => device.sendirs().length >= 3)
+	const frames = device.sendirs()
+	assert.equal(new Set(frames).size, 1)
+	assert.match(frames[0], /^sendir,1:1,\d+,38000,3,1,4,950$/)
+
+	assert.equal(client.stopIR(1), true)
+	assert.equal((await settled)[0].status, 'stopped')
+	const count = device.sendirs().length
+	await sleep(125)
+	assert.equal(device.sendirs().length, count)
+})
+
+test('a completed burst leaves the hold pending until the stop is acknowledged', async (t) => {
+	const { device, client } = await setup(t)
+	device.swallowSendir = true
+	device.stopDelayMs = 100
+	const results = []
+	client.on('result', (result) => results.push(result))
+	client.startHold(1, parseIrCode('38000,1,1,4,950'))
+	await waitFor(() => device.sendirs().length === 1)
+	assert.equal(client.stopIR(1), true)
+	await waitFor(() => device.received.includes('stopir,1:1'))
+
+	const id = device.sendirs()[0].split(',')[2]
+	device._reply([...device.sockets][0], `completeir,1:1,${id}`)
+	await sleep(20)
+	assert.deepEqual(results, [])
+	await waitFor(() => results.length === 1)
+	assert.equal(results[0].status, 'stopped')
+	assert.equal(client.queueDepth(), 0)
+})
+
+test(
+	'a hold ends after a silent connection times out and stays ended after reconnect',
+	{ timeout: 4000 },
+	async (t) => {
+		const { device, client } = await setup(t, { retryUncertain: true })
+		device.swallowSendir = true
+		const settled = once(client, 'result')
+		client.startHold(1, parseIrCode('38000,1,1,4,950'))
+		await waitFor(() => device.sendirs().length >= 2)
+		device.silent = true
+		await waitForState(client, 'disconnected')
+		assert.equal((await settled)[0].status, 'uncertain')
+		const count = device.sendirs().length
+		device.silent = false
+		await waitForState(client, 'connected')
+		await sleep(125)
+		assert.equal(device.sendirs().length, count)
+	},
+)
+
+test('the documented invalid module error settles all affected sends without retrying', async (t) => {
+	const { device, client } = await setup(t, { retryUncertain: true })
+	device.swallowSendir = true
+	const first = client.sendIR(1, CODE)
+	const second = client.sendIR(2, CODE)
+	await waitFor(() => device.sendirs().length === 2)
+	device._reply([...device.sockets][0], 'ERR_0:0,002')
+
+	for (const result of await Promise.all([first, second])) {
+		assert.equal(result.status, 'error')
+		assert.match(result.error, /Invalid module address/)
+	}
+	assert.equal(device.sendirs().length, 2)
+})
+
+test('an addressed raw-command error cannot settle a managed send on the same port', async (t) => {
+	const { device, client } = await setup(t)
+	device.swallowSendir = true
+	device.rawReplies['set_IR,1:1,IR_BLASTER'] = 'ERR_1:1,014'
+	const pending = client.sendIR(1, CODE)
+	await waitFor(() => device.sendirs().length === 1)
+	const rawReply = once(client, 'log')
+	assert.equal(client.sendRaw('set_IR,1:1,IR_BLASTER'), true)
+	assert.match((await rawReply)[1], /Raw command reply: ERR_1:1,014/)
+	assert.equal(device.sockets.size, 2)
+	const id = device.sendirs()[0].split(',')[2]
+	device._reply([...device.sockets][0], `completeir,1:1,${id}`)
+	assert.equal((await pending).status, 'complete')
+})
+
 test('rejects new codes when a port queue is full', async (t) => {
 	const { device, client } = await setup(t, { maxQueuePerPort: 2 })
 	device.swallowSendir = true
@@ -359,18 +678,72 @@ test('a port-less error from a raw command does not fail the code in flight', as
 	assert.equal((await pending).status, 'stopped')
 })
 
+test('GC-100 uses an idle primary connection with a response fence for raw commands', async (t) => {
+	const device = new FakeItach()
+	device.firmwareReply = 'version,0,3.0-12'
+	device.rawReplies['get_IR,1:1'] = 'unknowncommand 21'
+	await device.listen()
+	const client = new ItachClient({ ...FAST, host: '127.0.0.1', port: device.port })
+	t.after(async () => {
+		client.stop()
+		await device.close()
+	})
+	client.start()
+	await waitForState(client, 'connected')
+
+	const raw = once(client, 'log')
+	assert.equal(client.sendRaw('get_IR,1:1'), true)
+	const pending = client.sendIR(1, CODE)
+	assert.match((await raw)[1], /Raw command reply: unknowncommand 21/)
+	assert.equal((await pending).status, 'complete')
+	assert.equal(device.sockets.size, 1)
+	assert.deepEqual(device.received.slice(2, 4), ['get_IR,1:1', 'getversion,0'])
+
+	device.swallowSendir = true
+	const active = client.sendIR(1, CODE)
+	await waitFor(() => device.sendirs().length === 2)
+	assert.equal(client.sendRaw('get_IR,1:1'), false)
+	const id = device.sendirs()[1].split(',')[2]
+	device._reply([...device.sockets][0], `completeir,1:1,${id}`)
+	assert.equal((await active).status, 'complete')
+})
+
 test('a raw command reply is not stored as the firmware version', async (t) => {
 	const { device, client } = await setup(t, { keepaliveInterval: 40 })
-	while (client.version === '') await sleep(10)
+	assert.equal(client.version, '710-1005-05')
 	const versions = []
 	client.on('version', (version) => versions.push(version))
 	device.rawReplies['get_IR,1:1'] = 'IR,1:1,IR'
 
 	assert.equal(client.sendRaw('get_IR,1:1'), true)
 	await sleep(100)
-	assert.ok(versions.includes('710-1005-05'))
-	assert.ok(versions.every((version) => version === '710-1005-05'))
+	assert.ok(device.received.filter((line) => line === 'getversion').length > 1)
+	assert.deepEqual(versions, [], 'unchanged firmware replies do not publish another update')
 	assert.equal(client.version, '710-1005-05')
+})
+
+test('cancels a learn on its socket and resumes the managed queue', async (t) => {
+	const { device, client } = await setup(t, { keepaliveInterval: 30 })
+	const controller = new AbortController()
+	const learned = client.learnIR(controller.signal)
+	await waitFor(() => device.received.includes('get_IRL'))
+	await assert.rejects(client.learnIR(controller.signal), /already in progress/)
+	const count = device.received.filter((line) => line === 'getversion').length
+	const queued = client.sendIR(1, CODE)
+	await sleep(80)
+	assert.equal(device.sendirs().length, 0)
+	assert.equal(device.received.filter((line) => line === 'getversion').length, count)
+	controller.abort()
+	await assert.rejects(learned, /cancelled/)
+	assert.equal((await queued).status, 'complete')
+	await waitFor(() => device.received.includes('stop_IRL'))
+})
+
+test('reports an unavailable learner and leaves ordinary delivery usable', async (t) => {
+	const { device, client } = await setup(t)
+	device.learnerUnavailable = true
+	await assert.rejects(client.learnIR(new AbortController().signal), /IR learner is unavailable.*LED lighting/)
+	assert.equal((await client.sendIR(1, CODE)).status, 'complete')
 })
 
 test('a manual reconnect is not counted or reported as a failure', async (t) => {

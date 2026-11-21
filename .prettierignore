@@ -1,5 +1,7 @@
 package.json
-pkg
+/LICENSE
+/pkg
+/dist
 yarn.lock
-*.tgz
+/*.tgz
 .github

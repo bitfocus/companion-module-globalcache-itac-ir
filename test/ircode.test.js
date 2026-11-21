@@ -1,6 +1,6 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { parseIrCode, withRepeat, transmitDurationMs, formatIrCode, IrCodeError } = require('../src/ircode')
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { parseIrCode, withRepeat, transmitDurationMs, formatIrCode, IrCodeError } from '../dist/ircode.js'
 
 const BODY = '38000,1,1,342,171,21,64,21,21,21,1520'
 
@@ -26,6 +26,7 @@ test('accepts codes from the previous version of the module unchanged', () => {
 
 test('drops a leading ID left over from the sendir header', () => {
 	assert.equal(formatIrCode(parseIrCode(`1,${BODY}`)), BODY)
+	assert.equal(formatIrCode(parseIrCode(`65535,${BODY}`)), BODY)
 })
 
 test('tolerates whitespace, line breaks and a trailing comma', () => {
@@ -51,6 +52,27 @@ test('rejects malformed codes with a helpful message', () => {
 	assert.throws(() => parseIrCode('sendir,1:1,38000,1,1,342,171,21,64'), /Frequency 1 Hz/)
 	assert.throws(() => parseIrCode('sendir,1:1'), /sendir/)
 	assert.throws(() => parseIrCode('0001 006D 0001 0000 0156 00AB'), /Pronto/)
+})
+
+test('decodes the iTach compressed example for timing and preserves the compressed wire form', () => {
+	const body = '40000,1,1,4,5A8,9ABB'
+	const compressed = parseIrCode(`sendir,1:2,2445,${body}`)
+	assert.deepEqual(compressed.pulses, [4, 5, 4, 5, 8, 9, 4, 5, 8, 9, 8, 9])
+	assert.equal(formatIrCode(compressed), body)
+	assert.equal(transmitDurationMs(compressed), transmitDurationMs(parseIrCode('40000,1,1,4,5,4,5,8,9,4,5,8,9,8,9')))
+	assert.throws(() => parseIrCode('40000,1,1,4,5B'), /Undefined compressed IR pulse pair B/)
+	assert.throws(() => parseIrCode('40000,1,1,4,5,A'), /Invalid compressed IR pulse pair/)
+})
+
+test('enforces minimum pulse duration, pair count, and repeat offset', () => {
+	assert.throws(() => parseIrCode('60000,1,1,4,5'), /Pulse value 4 is out of range/)
+	assert.deepEqual(parseIrCode('60000,1,1,5,5').pulses, [5, 5])
+	assert.throws(() => parseIrCode(`38000,1,1,${Array(522).fill(5).join(',')}`), /exceeds 520 pulse values/)
+	assert.throws(() => parseIrCode(`38000,1,1,5,5${'A'.repeat(260)}`), /exceeds 520 pulse values/)
+	const pulses = Array(386).fill(5).join(',')
+	assert.throws(() => parseIrCode(`38000,2,385,${pulses}`), /offset 385 exceeds 383/)
+	assert.throws(() => withRepeat(parseIrCode(`38000,1,385,${pulses}`), 2), /offset 385 exceeds 383/)
+	assert.equal(parseIrCode(`38000,2,383,${pulses}`).offset, 383)
 })
 
 test('repeat override', () => {

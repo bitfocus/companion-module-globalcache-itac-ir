@@ -1,9 +1,9 @@
 // A minimal stand-in for an iTach IP2IR, used to exercise failure modes that
 // are hard to reproduce with real hardware on demand.
 
-const net = require('net')
+import net from 'net'
 
-class FakeItach {
+export class FakeItach {
 	constructor() {
 		this.received = []
 		this.sockets = new Set()
@@ -13,9 +13,16 @@ class FakeItach {
 		this.busyCount = 0 // answer the next N sendir with busyIR
 		this.errorCode = null // answer sendir with ERR_1:<port>,<code>
 		this.swallowSendir = false // never confirm sendir
+		this.stopDelayMs = 0
+		this.ignoreStop = false
 		this.portlessError = false // send ERR_<code> without a connector
 		this.rawReplies = {} // exact command line -> reply, for raw commands
 		this.devices = ['device,0,0 ETHERNET', 'device,1,3 IR']
+		this.ignoreDeviceList = false
+		this.firmwareReply = '710-1005-05'
+		this.portModes = {}
+		this.learnedCode = null
+		this.learnerUnavailable = false
 		this.timers = new Set()
 	}
 
@@ -58,10 +65,17 @@ class FakeItach {
 		this.received.push(line)
 		if (this.silent) return
 
-		if (line === 'getversion') return this._reply(socket, '710-1005-05')
+		if (line === 'getversion' || line === 'getversion,0') return this._reply(socket, this.firmwareReply)
+		if (line === 'get_IRL') {
+			if (this.learnerUnavailable) return this._reply(socket, 'IR Learner Unavailable')
+			this._reply(socket, 'IR Learner Enabled')
+			if (this.learnedCode) this._later(10, () => this._reply(socket, this.learnedCode))
+			return
+		}
+		if (line === 'stop_IRL') return this._reply(socket, 'IR Learner Disabled')
 		if (line === 'getdevices') {
-			for (const d of this.devices) this._reply(socket, d)
-			return this._reply(socket, 'endlistdevices')
+			if (!this.ignoreDeviceList) this._replyWithDevices(socket)
+			return
 		}
 
 		let m
@@ -78,10 +92,22 @@ class FakeItach {
 			if (this.swallowSendir) return
 			return this._later(this.transmitMs, () => this._reply(socket, `completeir,${mod}:${port},${id}`))
 		}
-		if ((m = line.match(/^stopir,(\d+):(\d+)$/))) return this._reply(socket, line)
+		if (/^stopir,\d+:\d+$/.test(line)) {
+			if (!this.ignoreStop) this._later(this.stopDelayMs, () => this._reply(socket, line))
+			return
+		}
 
 		if (Object.prototype.hasOwnProperty.call(this.rawReplies, line)) return this._reply(socket, this.rawReplies[line])
+		if ((m = line.match(/^get_IR,(\d+:\d+)$/))) {
+			const address = m[1]
+			return this._reply(socket, `IR,${address},${this.portModes[address] ?? 'IR'}`)
+		}
 		this._reply(socket, 'ERR_01')
+	}
+
+	_replyWithDevices(socket) {
+		for (const device of this.devices) this._reply(socket, device)
+		this._reply(socket, 'endlistdevices')
 	}
 
 	sendirs() {
@@ -99,5 +125,3 @@ class FakeItach {
 		await new Promise((resolve) => this.server.close(resolve))
 	}
 }
-
-module.exports = { FakeItach }

@@ -1,7 +1,32 @@
 // Global Caché Unified TCP API (port 4998) response parsing.
 // Commands and responses are terminated with a carriage return.
 
-const ERROR_CODES = {
+export interface DeviceInfo {
+	type: 'device'
+	module: number
+	ports: number
+	kind: string
+}
+
+export interface DeviceError {
+	type: 'error'
+	module?: number
+	port?: number
+	code: number
+	message: string
+}
+
+type DeviceResponse =
+	| DeviceInfo
+	| DeviceError
+	| { type: 'complete' | 'busy'; module: number; port: number; id: number }
+	| { type: 'stopped'; module: number; port: number }
+	| { type: 'portMode'; module: number; port: number; mode: string }
+	| { type: 'endDevices' }
+	| { type: 'version'; text: string; module?: number }
+	| { type: 'other'; text: string }
+
+const ERROR_CODES: Partial<Record<number, string>> = {
 	1: 'Invalid command. Command not found',
 	2: 'Invalid module address (does not exist)',
 	3: 'Invalid connector address (does not exist)',
@@ -27,7 +52,7 @@ const ERROR_CODES = {
 	23: 'Unknown option',
 }
 
-function describeError(code) {
+export function describeError(code: number): string {
 	return ERROR_CODES[code] ?? `Device error ${code}`
 }
 
@@ -36,7 +61,7 @@ function describeError(code) {
  * Unrecognised lines are returned as { type: 'other' } so callers can still
  * treat them as proof the connection is alive (e.g. the getversion reply).
  */
-function parseResponse(line) {
+export function parseResponse(line: string): DeviceResponse {
 	let m
 
 	if ((m = line.match(/^completeir,(\d+):(\d+),(\d+)$/i))) {
@@ -62,6 +87,9 @@ function parseResponse(line) {
 	if ((m = line.match(/^stopir,(\d+):(\d+)$/i))) {
 		return { type: 'stopped', module: Number(m[1]), port: Number(m[2]) }
 	}
+	if ((m = line.match(/^IR,(\d+):(\d+),([A-Z0-9_]+)$/i))) {
+		return { type: 'portMode', module: Number(m[1]), port: Number(m[2]), mode: m[3].toUpperCase() }
+	}
 	if ((m = line.match(/^device,(\d+),(\d+)\s+(\S+)/i))) {
 		return { type: 'device', module: Number(m[1]), ports: Number(m[2]), kind: m[3].toUpperCase() }
 	}
@@ -69,8 +97,8 @@ function parseResponse(line) {
 		return { type: 'endDevices' }
 	}
 	// GC-100 answers "version,0,3.0-12", iTach answers "710-1005-05"
-	if ((m = line.match(/^version,\d+,(.*)$/i))) {
-		return { type: 'version', text: m[1].trim() }
+	if ((m = line.match(/^version,(\d+),(.*)$/i))) {
+		return { type: 'version', module: Number(m[1]), text: m[2].trim() }
 	}
 	if (/^\d+(?:[.-]\d+)+$/.test(line)) {
 		return { type: 'version', text: line }
@@ -80,21 +108,17 @@ function parseResponse(line) {
 }
 
 /** Splits a TCP stream into lines, buffering partial lines between chunks */
-class LineSplitter {
-	constructor() {
-		this.buffer = ''
-	}
+export class LineSplitter {
+	private buffer = ''
 
-	push(chunk) {
-		this.buffer += chunk.toString('latin1')
+	push(chunk: Buffer | string): string[] {
+		this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('latin1')
 		const parts = this.buffer.split(/\r\n|\r|\n/)
-		this.buffer = parts.pop()
+		this.buffer = parts.pop() ?? ''
 		return parts.map((line) => line.trim()).filter((line) => line !== '')
 	}
 
-	reset() {
+	reset(): void {
 		this.buffer = ''
 	}
 }
-
-module.exports = { parseResponse, describeError, LineSplitter }

@@ -1,6 +1,6 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { parseResponse, LineSplitter } = require('../src/protocol')
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { parseResponse, LineSplitter } from '../dist/protocol.js'
 
 test('parses device responses', () => {
 	assert.deepEqual(parseResponse('completeir,1:2,345'), { type: 'complete', module: 1, port: 2, id: 345 })
@@ -18,9 +18,10 @@ test('parses device responses', () => {
 	assert.deepEqual(parseResponse('device,1,3 IR'), { type: 'device', module: 1, ports: 3, kind: 'IR' })
 	assert.equal(parseResponse('endlistdevices').type, 'endDevices')
 	assert.equal(parseResponse('stopir,1:1').type, 'stopped')
+	assert.deepEqual(parseResponse('IR,1:3,IR_BLASTER'), { type: 'portMode', module: 1, port: 3, mode: 'IR_BLASTER' })
 	assert.deepEqual(parseResponse('710-1005-05'), { type: 'version', text: '710-1005-05' })
-	assert.deepEqual(parseResponse('version,0,3.0-12'), { type: 'version', text: '3.0-12' })
-	assert.deepEqual(parseResponse('IR,1:1,IR'), { type: 'other', text: 'IR,1:1,IR' })
+	assert.deepEqual(parseResponse('version,0,3.0-12'), { type: 'version', module: 0, text: '3.0-12' })
+	assert.deepEqual(parseResponse('NET,0:1,LOCKED'), { type: 'other', text: 'NET,0:1,LOCKED' })
 })
 
 test('splits lines across chunks and mixed terminators', () => {
