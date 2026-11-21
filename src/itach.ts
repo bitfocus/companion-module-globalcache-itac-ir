@@ -6,8 +6,8 @@
 //
 // Delivery model:
 //   - Each IR port has its own FIFO queue with one command in flight. The next
-//     command is only sent once the device confirms the previous one with
-//     completeir, so codes are never cut short by the next button press.
+//     command waits for the previous command to settle. A hold keeps its
+//     place on the port and refreshes a bounded burst until stopped.
 //   - Every command gets a unique ID so confirmations are matched exactly.
 //   - busyIR (port in use by another controller) is retried with a back-off:
 //     the code was definitely not transmitted, so a retry is always safe.
@@ -24,7 +24,7 @@
 import { Socket } from 'node:net'
 import { EventEmitter } from 'node:events'
 import { parseResponse, LineSplitter, type DeviceError, type DeviceInfo } from './protocol.js'
-import { formatIrCode, transmitDurationMs, type IrCode } from './ircode.js'
+import { formatIrCode, transmitDurationMs, withRepeat, type IrCode } from './ircode.js'
 
 export type ClientState = 'idle' | 'connecting' | 'connected' | 'disconnected'
 export type StateInfo = { manual?: boolean }
@@ -50,6 +50,7 @@ type QueuedCommand = {
 	ageStartedAt: number
 	expiryTimer?: NodeJS.Timeout
 	completionTimer?: NodeJS.Timeout
+	hold?: { refreshMs: number; timer?: NodeJS.Timeout }
 }
 
 type InflightCommand = QueuedCommand & { id: number }
@@ -58,6 +59,7 @@ interface PortState {
 	queue: QueuedCommand[]
 	inflight: InflightCommand | null
 	waiting: { cmd: QueuedCommand; timer: NodeJS.Timeout } | null
+	stopTimer?: NodeJS.Timeout
 }
 
 interface ClientEvents {
@@ -88,6 +90,7 @@ const DEFAULTS = {
 }
 
 const MAX_ID = 65535
+const HOLD_REPEATS = 3
 
 export class ItachClient extends EventEmitter<ClientEvents> {
 	readonly options: typeof DEFAULTS
@@ -98,6 +101,9 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 	private running = false
 	private socket: Socket | null = null
+	private rawSocket?: Socket
+	private legacyGc100 = false
+	private legacyRawTimer?: NodeJS.Timeout
 	private readonly splitter = new LineSplitter()
 	private readonly ports = new Map<number, PortState>()
 	private nextId = 1
@@ -108,7 +114,6 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	private lastRx = 0
 	private probe: { sentAt: number } | null = null
 	private discovery?: { startedAt: number; sawVersion: boolean; sawDeviceList: boolean }
-	private unattributedRequests = 0
 	private pendingDevices: DeviceInfo[] = []
 	private stateMessage?: string
 	private manualReconnect = false
@@ -132,7 +137,8 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		clearTimeout(this.reconnectTimer)
 		this.reconnectTimer = undefined
 		if (this.socket) this._dropConnection(this.socket, 'Stopped')
-		for (const port of this.ports.keys()) this._cancelPort(port, 'cancelled', 'Connection closed')
+		for (const p of this.ports.values()) this._cancelQueued(p, 'Connection closed')
+		this.emit('queue')
 		this._setState('idle')
 	}
 
@@ -160,6 +166,18 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	 *   status: complete | stopped | busy | error | uncertain | expired | cancelled | rejected
 	 */
 	async sendIR(port: number, code: IrCode): Promise<DeliveryResult> {
+		return this._sendIR(port, code)
+	}
+
+	/** Refresh a short burst with the same command ID until Stop IR is called. */
+	startHold(port: number, code: IrCode): void {
+		const burst = withRepeat(code, HOLD_REPEATS)
+		// Two repeat sections leave one section for the next refresh to arrive.
+		const refreshMs = Math.max(20, Math.floor(transmitDurationMs(burst) - transmitDurationMs({ ...code, repeat: 1 })))
+		void this._sendIR(port, burst, { refreshMs })
+	}
+
+	private async _sendIR(port: number, code: IrCode, hold?: QueuedCommand['hold']): Promise<DeliveryResult> {
 		return new Promise((resolve) => {
 			const cmd: QueuedCommand = {
 				port,
@@ -170,11 +188,16 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 				done: false,
 				ageRemaining: this.options.maxCommandAge,
 				ageStartedAt: 0,
+				hold,
 			}
 
 			if (!this.running) return this._finish(cmd, false, 'rejected', 'No device configured')
+			if (hold && !this.connected) return this._finish(cmd, false, 'rejected', 'Cannot start a hold while disconnected')
 
 			const p = this._port(port)
+			if (hold && (p.inflight?.hold || p.waiting?.cmd.hold || p.queue.some((item) => item.hold))) {
+				return this._finish(cmd, false, 'rejected', `Port ${port} already has a hold`)
+			}
 			if (this._depth(p) >= this.options.maxQueuePerPort) {
 				return this._finish(cmd, false, 'rejected', `Port ${port} queue is full (${this.options.maxQueuePerPort})`)
 			}
@@ -186,32 +209,81 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 	/** Abort the code transmitting on a port and discard anything queued for it */
 	stopIR(port: number): boolean {
-		this._cancelPort(port, 'cancelled', 'Cancelled by Stop IR')
-		if (!this.connected) return false
+		const p = this._port(port)
+		this._cancelQueued(p, 'Cancelled by Stop IR')
+		this.emit('queue')
+		if (!this.connected || this.legacyRawTimer) return false
+		if (p.stopTimer) return true
+
+		if (p.inflight) {
+			this._clearSendTimers(p.inflight)
+		}
+		p.stopTimer = setTimeout(() => {
+			// An old stop acknowledgement has no ID. Close the socket before any
+			// new send can be confused with that acknowledgement.
+			const reason = `No Stop IR acknowledgement on port ${port}`
+			this.emit('log', 'warn', reason)
+			this._dropConnection(this.socket, reason)
+		}, this.options.responseTimeout)
 		this._write(`stopir,${this.options.moduleAddress}:${port}`)
 		return true
 	}
 
 	/** Discard every queued (not yet transmitting) command */
 	clearQueue(): void {
-		for (const p of this.ports.values()) {
-			for (const cmd of p.queue.splice(0)) this._finish(cmd, false, 'cancelled', 'Queue cleared')
-			if (p.waiting) {
-				clearTimeout(p.waiting.timer)
-				this._finish(p.waiting.cmd, false, 'cancelled', 'Queue cleared')
-				p.waiting = null
-			}
-		}
+		for (const p of this.ports.values()) this._cancelQueued(p, 'Queue cleared')
 		this.emit('queue')
 	}
 
-	/** Send a raw API command, for advanced use */
+	/** Keep raw command replies off the socket used for managed IR delivery. */
 	sendRaw(line: string): boolean {
 		if (!this.connected) return false
-		// Its reply must not be mistaken for the result of an IR code in flight
-		this.unattributedRequests++
-		this._write(line)
+		if (this.legacyGc100) return this._sendLegacyRaw(line)
+		const socket = this.rawSocket ?? this._connectRawSocket()
+		socket.write(line + '\r')
 		return true
+	}
+
+	private _sendLegacyRaw(line: string): boolean {
+		// A GC-100 only allows one TCP client. Use a version query as a fence
+		// so any raw error arrives before managed sends can resume.
+		if (this.legacyRawTimer || this.probe || this.queueDepth() || [...this.ports.values()].some((p) => p.stopTimer)) {
+			return false
+		}
+		this.legacyRawTimer = setTimeout(() => {
+			this._dropConnection(this.socket, 'No reply to the raw command verification query')
+		}, this.options.responseTimeout)
+		this._write(line)
+		this._write('getversion,0')
+		return true
+	}
+
+	private _connectRawSocket() {
+		const socket = new Socket()
+		const splitter = new LineSplitter()
+		this.rawSocket = socket
+		const timer = setTimeout(
+			() => socket.destroy(new Error('Raw command connection timed out')),
+			this.options.connectTimeout,
+		)
+		socket.once('connect', () => {
+			clearTimeout(timer)
+			socket.setNoDelay(true)
+		})
+		socket.on('data', (chunk) => {
+			for (const reply of splitter.push(chunk)) {
+				const response = parseResponse(reply)
+				const level = response.type === 'error' ? 'warn' : 'debug'
+				this.emit('log', level, `Raw command reply: ${reply}`)
+			}
+		})
+		socket.on('error', (err) => this.emit('log', 'warn', `Raw command connection failed: ${err.message}`))
+		socket.once('close', () => {
+			clearTimeout(timer)
+			if (this.rawSocket === socket) this.rawSocket = undefined
+		})
+		socket.connect(this.options.port, this.options.host)
+		return socket
 	}
 
 	queueDepth(port?: number): number {
@@ -253,9 +325,9 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 			socket.setNoDelay(true)
 			socket.setKeepAlive(true, 5000)
 			this.lastRx = Date.now()
-			this.unattributedRequests = 0
 			this.devices = null
 			this.version = ''
+			this.legacyGc100 = false
 			this.pendingDevices = []
 			this.discovery = { startedAt: this.lastRx, sawVersion: false, sawDeviceList: false }
 			this.tickTimer = setInterval(() => this._tick(), this.options.tickInterval)
@@ -286,16 +358,29 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		socket.on('error', () => {})
 		socket.destroy()
 
+		this.rawSocket?.destroy()
+		this.rawSocket = undefined
+		clearTimeout(this.legacyRawTimer)
+		this.legacyRawTimer = undefined
+
 		for (const p of this.ports.values()) {
+			const wasStopping = !!p.stopTimer
+			clearTimeout(p.stopTimer)
+			p.stopTimer = undefined
 			if (p.inflight) {
 				const cmd = p.inflight
-				p.inflight = null
-				clearTimeout(cmd.completionTimer)
-				this._settleUncertain(cmd, `Connection lost while sending (${reason})`)
+				this._clearInflight(cmd)
+				if (wasStopping) {
+					this._finish(cmd, false, 'uncertain', `Stop IR was not acknowledged (${reason})`)
+				} else {
+					this._settleUncertain(cmd, `Connection lost while sending (${reason})`)
+				}
 			}
-			// Nothing of ours is transmitting now, so queued codes start ageing
+			// A held button must be released and pressed again after a disconnect.
+			this._cancelQueued(p, 'Hold cancelled on disconnect', true)
 			this._syncQueueExpiry(p)
 		}
+		this.emit('queue')
 
 		if (!this.running) return
 
@@ -321,12 +406,12 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	private _probe() {
 		if (!this.connected || this.probe) return
 		this.probe = { sentAt: Date.now() }
-		this.unattributedRequests++
 		this._write('getversion')
 	}
 
 	private _tick() {
 		const now = Date.now()
+		if (this.legacyRawTimer) return
 		if (this.discovery) {
 			if (now - this.discovery.startedAt >= this.options.responseTimeout) {
 				if (this.discovery.sawVersion || this.discovery.sawDeviceList) {
@@ -349,10 +434,12 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 			return
 		}
 
-		// While a code is transmitting its own completion timeout watches the link
-		const { keepaliveInterval } = this.options
-		const transmitting = [...this.ports.values()].some((p) => p.inflight)
-		if (keepaliveInterval > 0 && !transmitting && now - this.lastRx >= keepaliveInterval) this._probe()
+		// A continuously refreshed hold may not produce completeir until release.
+		const ports = [...this.ports.values()]
+		const holding = ports.some((p) => p.inflight?.hold && !p.stopTimer)
+		const transmitting = ports.some((p) => p.inflight)
+		const interval = holding ? Math.min(1000, this.options.responseTimeout) : this.options.keepaliveInterval
+		if (interval > 0 && (holding || !transmitting) && now - this.lastRx >= interval) this._probe()
 	}
 
 	private _write(line: string) {
@@ -372,20 +459,40 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 	private _handleLine(line: string) {
 		this.lastRx = Date.now()
+		const wasProbing = !!this.probe
 		this.probe = null
 
 		const res = parseResponse(line)
+		if (this.legacyRawTimer) {
+			if (res.type === 'version' && res.module === 0) {
+				clearTimeout(this.legacyRawTimer)
+				this.legacyRawTimer = undefined
+				for (const port of this.ports.keys()) this._pump(port)
+			} else {
+				this.emit('log', res.type === 'error' ? 'warn' : 'debug', `Raw command reply: ${line}`)
+			}
+			return
+		}
 		switch (res.type) {
 			case 'complete': {
-				const cmd = this._inflightFor(res.port, res.id)
+				const cmd = this._inflightFor(res.module, res.port, res.id)
 				if (!cmd) return this.emit('log', 'debug', `Ignoring confirmation for unknown command: ${line}`)
+				if (cmd.hold) {
+					// completeir confirms one burst. The hold itself ends when the
+					// device acknowledges the stop, even if a burst has completed.
+					const p = this._port(cmd.port)
+					clearTimeout(cmd.completionTimer)
+					if (this.legacyGc100 && !p.stopTimer) this._transmit(cmd, p)
+					return
+				}
 				this._clearInflight(cmd)
 				this._finish(cmd, true, 'complete')
 				return this._pump(cmd.port)
 			}
 			case 'busy': {
-				const cmd = this._inflightFor(res.port, res.id)
+				const cmd = this._inflightFor(res.module, res.port, res.id)
 				if (!cmd) return this.emit('log', 'debug', `Ignoring busy reply for unknown command: ${line}`)
+				if (this._port(cmd.port).stopTimer) return
 				this._clearInflight(cmd)
 				if (cmd.attempts <= this.options.retries) {
 					const delay = this.options.busyRetryDelay * cmd.attempts
@@ -406,18 +513,8 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 				}
 				return this._pump(cmd.port)
 			}
-			case 'error': {
-				const cmd = this._inflightForError(res)
-				const text = `${res.message} (ERR ${String(res.code).padStart(3, '0')})`
-				if (!cmd) {
-					// A bare "ERR_008" may belong to a raw command or a keepalive probe
-					if (res.port === undefined) this._consumeUnattributed()
-					return this.emit('log', 'warn', `Device reported: ${text}`)
-				}
-				this._clearInflight(cmd)
-				this._finish(cmd, false, 'error', text)
-				return this._pump(cmd.port)
-			}
+			case 'error':
+				return this._handleError(res, wasProbing)
 			case 'device':
 				this.pendingDevices.push(res)
 				return
@@ -431,9 +528,10 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 				}
 				return
 			case 'stopped':
+				if (res.module === this.options.moduleAddress) this._handleStopped(res.port)
 				return
 			case 'version':
-				if (!this.discovery) this._consumeUnattributed()
+				if (!this.version && res.module !== undefined && !res.text.startsWith('710-')) this.legacyGc100 = true
 				if (this.version !== res.text) {
 					this.version = res.text
 					this.emit('version', this.version)
@@ -444,13 +542,67 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 				}
 				return
 			default:
-				this._consumeUnattributed()
 				return this.emit('log', 'debug', `Unexpected reply from device: ${line}`)
 		}
 	}
 
-	private _consumeUnattributed() {
-		if (this.unattributedRequests > 0) this.unattributedRequests--
+	private _handleStopped(port: number) {
+		const p = this.ports.get(port)
+		if (!p || (!p.stopTimer && !p.inflight)) return
+		clearTimeout(p.stopTimer)
+		p.stopTimer = undefined
+		if (p.inflight) {
+			const cmd = p.inflight
+			this._clearInflight(cmd)
+			this._finish(cmd, true, 'stopped')
+		}
+		this._pump(port)
+	}
+
+	private _handleError(res: DeviceError, wasProbing: boolean): void {
+		const message = `${res.message} (ERR ${String(res.code).padStart(3, '0')})`
+		if (this.discovery) {
+			this.emit('log', 'warn', `Device reported: ${message}`)
+			return
+		}
+
+		const invalidModule = res.module === 0 && res.port === 0 && res.code === 2
+		let affected: [number, PortState][] = []
+		if (invalidModule) {
+			// Every managed IR command on this connection targets the same invalid module.
+			affected = [...this.ports].filter(([, p]) => p.inflight || p.stopTimer)
+		} else if (res.module === this.options.moduleAddress && res.port !== undefined && res.port > 0) {
+			const p = this.ports.get(res.port)
+			if (p) affected = [[res.port, p]]
+		} else if (!wasProbing && (res.port === undefined || (res.module === 0 && res.port === 0))) {
+			const candidates = [...this.ports].filter(([, p]) => p.inflight || p.stopTimer)
+			if (candidates.length === 1) affected = candidates
+		}
+		if (!affected.length) {
+			this.emit('log', 'warn', `Device reported: ${message}`)
+			return
+		}
+
+		// Settle the snapshot before pumping: a global error cannot settle later sends.
+		for (const [port, p] of affected) {
+			if (p.stopTimer) {
+				// With a send and a stop outstanding on the same port, an error
+				// has no request ID. Keep waiting for their explicit replies.
+				this.emit('log', 'warn', `Device reported on port ${port}: ${message}`)
+				if (p.inflight && !invalidModule) continue
+				clearTimeout(p.stopTimer)
+				p.stopTimer = undefined
+				if (!p.inflight) continue
+			}
+			if (!p.inflight) {
+				this.emit('log', 'warn', `Device reported: ${message}`)
+				continue
+			}
+			const cmd = p.inflight
+			this._clearInflight(cmd)
+			this._finish(cmd, false, 'error', message)
+		}
+		for (const [port] of affected) this._pump(port)
 	}
 
 	private _checkDevices() {
@@ -464,18 +616,10 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		return null
 	}
 
-	private _inflightFor(port: number, id: number) {
+	private _inflightFor(module: number, port: number, id: number) {
+		if (module !== this.options.moduleAddress) return null
 		const p = this.ports.get(port)
 		return p?.inflight && p.inflight.id === id ? p.inflight : null
-	}
-
-	private _inflightForError(res: DeviceError) {
-		if (res.port !== undefined) return this.ports.get(res.port)?.inflight ?? null
-		// Older error format without a connector. Don't charge it to an IR code when a
-		// raw command or keepalive probe is also waiting for a reply.
-		if (this.unattributedRequests > 0) return null
-		const inflight = [...this.ports.values()].map((p) => p.inflight).filter((cmd) => cmd !== null)
-		return inflight.length === 1 ? inflight[0] : null
 	}
 
 	// -------------------------------------------------------------------- queue
@@ -569,7 +713,7 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	private _pump(port: number) {
 		const p = this._port(port)
 		this._syncQueueExpiry(p)
-		if (!this.connected || p.inflight || p.waiting) return
+		if (!this.connected || p.inflight || p.waiting || p.stopTimer || this.legacyRawTimer) return
 
 		let queued = p.queue.shift()
 		while (queued) {
@@ -588,32 +732,48 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		cmd.attempts++
 		p.inflight = cmd
 
-		const { moduleAddress, completionMargin } = this.options
-		this._write(`sendir,${moduleAddress}:${port},${cmd.id},${formatIrCode(cmd.code)}`)
-		this.stats.sent++
-
-		const timeout = Math.ceil(transmitDurationMs(cmd.code)) + completionMargin
-		cmd.completionTimer = setTimeout(() => {
-			if (p.inflight !== cmd) return
-			p.inflight = null
-			this._settleUncertain(cmd, `No confirmation from device within ${timeout}ms`)
-			// A missing confirmation often means a dead connection: check it now
-			this._probe()
-			this._pump(port)
-		}, timeout)
-
+		this._transmit(cmd, p)
 		this._syncQueueExpiry(p)
 		this.emit('queue')
 	}
 
-	private _clearInflight(cmd: InflightCommand) {
+	private _transmit(cmd: InflightCommand, p: PortState) {
+		const { moduleAddress, completionMargin } = this.options
+		this._write(`sendir,${moduleAddress}:${cmd.port},${cmd.id},${formatIrCode(cmd.code)}`)
+		this.stats.sent++
+
+		const timeout = Math.ceil(transmitDurationMs(cmd.code)) + completionMargin
 		clearTimeout(cmd.completionTimer)
+		cmd.completionTimer = setTimeout(() => {
+			if (p.inflight !== cmd) return
+			this._clearInflight(cmd)
+			this._settleUncertain(cmd, `No confirmation from device within ${timeout}ms`)
+			this._probe()
+			this._pump(cmd.port)
+		}, timeout)
+
+		const hold = cmd.hold
+		if (hold && !this.legacyGc100) {
+			hold.timer = setTimeout(() => {
+				if (!this.connected || p.inflight !== cmd || p.stopTimer) return
+				this._transmit(cmd, p)
+			}, hold.refreshMs)
+		}
+	}
+
+	private _clearSendTimers(cmd: InflightCommand) {
+		clearTimeout(cmd.completionTimer)
+		clearTimeout(cmd.hold?.timer)
+	}
+
+	private _clearInflight(cmd: InflightCommand) {
+		this._clearSendTimers(cmd)
 		const p = this._port(cmd.port)
 		if (p.inflight === cmd) p.inflight = null
 	}
 
 	private _settleUncertain(cmd: QueuedCommand, reason: string) {
-		if (this.options.retryUncertain && cmd.attempts <= this.options.retries) {
+		if (this.running && !cmd.hold && this.options.retryUncertain && cmd.attempts <= this.options.retries) {
 			this.emit('log', 'warn', `${reason}; resending to port ${cmd.port}`)
 			this._enqueue(cmd, true)
 		} else {
@@ -621,21 +781,13 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		}
 	}
 
-	private _cancelPort(port: number, status: DeliveryStatus, reason: string) {
-		const p = this.ports.get(port)
-		if (!p) return
-		for (const cmd of p.queue.splice(0)) this._finish(cmd, false, status, reason)
-		if (p.waiting) {
-			clearTimeout(p.waiting.timer)
-			this._finish(p.waiting.cmd, false, status, reason)
-			p.waiting = null
+	private _cancelQueued(p: PortState, reason: string, onlyHolds = false) {
+		const queued = onlyHolds ? p.queue.filter((cmd) => cmd.hold) : [...p.queue]
+		if (p.waiting && (!onlyHolds || p.waiting.cmd.hold)) queued.push(p.waiting.cmd)
+		for (const cmd of queued) {
+			this._removeQueued(cmd, p)
+			this._finish(cmd, false, 'cancelled', reason)
 		}
-		if (p.inflight) {
-			const cmd = p.inflight
-			this._clearInflight(cmd)
-			this._finish(cmd, true, 'stopped')
-		}
-		this.emit('queue')
 	}
 
 	private _finish(cmd: QueuedCommand, ok: boolean, status: DeliveryStatus, error?: string) {

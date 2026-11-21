@@ -47,7 +47,7 @@ export function UpdatePresets(instance: GlobalCacheItachInstance): void {
 			style: { text: `HOLD ${port}`, size: '18', color: WHITE, bgcolor: BLACK },
 			steps: [
 				{
-					down: [{ actionId: 'portSet', options: { portNum: port, ir: '', repeat: 50 } }],
+					down: [{ actionId: 'startHold', options: { portNum: port, ir: '' } }],
 					up: [{ actionId: 'stopIR', options: { portNum: port } }],
 				},
 			],

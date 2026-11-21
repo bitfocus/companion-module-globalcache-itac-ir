@@ -22,7 +22,8 @@ type DeviceResponse =
 	| { type: 'complete' | 'busy'; module: number; port: number; id: number }
 	| { type: 'stopped'; module: number; port: number }
 	| { type: 'endDevices' }
-	| { type: 'version' | 'other'; text: string }
+	| { type: 'version'; text: string; module?: number }
+	| { type: 'other'; text: string }
 
 const ERROR_CODES: Partial<Record<number, string>> = {
 	1: 'Invalid command. Command not found',
@@ -92,8 +93,8 @@ export function parseResponse(line: string): DeviceResponse {
 		return { type: 'endDevices' }
 	}
 	// GC-100 answers "version,0,3.0-12", iTach answers "710-1005-05"
-	if ((m = line.match(/^version,\d+,(.*)$/i))) {
-		return { type: 'version', text: m[1].trim() }
+	if ((m = line.match(/^version,(\d+),(.*)$/i))) {
+		return { type: 'version', module: Number(m[1]), text: m[2].trim() }
 	}
 	if (/^\d+(?:[.-]\d+)+$/.test(line)) {
 		return { type: 'version', text: line }

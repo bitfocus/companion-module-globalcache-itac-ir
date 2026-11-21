@@ -1,9 +1,10 @@
-import type { CompanionInputFieldDropdown } from '@companion-module/base'
+import type { CompanionInputFieldDropdown, CompanionInputFieldTextInput } from '@companion-module/base'
 import { parseIrCode, withRepeat, IrCodeError } from './ircode.js'
 import type GlobalCacheItachInstance from './main.js'
 
 export type ActionsSchema = {
 	portSet: { options: { portNum: string; ir: string; repeat: number } }
+	startHold: { options: { portNum: string; ir: string } }
 	stopIR: { options: { portNum: string } }
 	clearQueue: { options: Record<string, never> }
 	reconnect: { options: Record<string, never> }
@@ -13,6 +14,11 @@ export type ActionsSchema = {
 export function toPort(value: string | number | undefined): number | undefined {
 	const port = Number.parseInt(String(value), 10)
 	return port >= 1 && port <= 255 ? port : undefined
+}
+
+function recordInvalid(instance: GlobalCacheItachInstance, port: number, error: unknown) {
+	if (!(error instanceof IrCodeError)) throw error
+	instance.recordResult({ ok: false, status: 'invalid', error: error.message, port, attempts: 0, latencyMs: 0 })
 }
 
 export function UpdateActions(instance: GlobalCacheItachInstance): void {
@@ -26,20 +32,21 @@ export function UpdateActions(instance: GlobalCacheItachInstance): void {
 		regex: '/^\\d+$/',
 		tooltip: 'Type a port number if it is not listed',
 	}
+	const irOption: CompanionInputFieldTextInput<'ir'> = {
+		type: 'textinput',
+		useVariables: true,
+		label: 'IR Code',
+		id: 'ir',
+		tooltip: 'Global Caché (numeric or compressed), a full sendir line, or learned Pronto hex',
+	}
+
 	instance.setActionDefinitions({
 		portSet: {
 			name: 'Send IR code',
 			description: 'Transmit a learned IR code. Waits until the device confirms the code was sent.',
 			options: [
 				portOption,
-				{
-					type: 'textinput',
-					useVariables: true,
-					label: 'IR Code',
-					id: 'ir',
-					tooltip:
-						'Global Caché format (38000,1,1,342,...), a full sendir line copied from iLearn, or Pronto hex (0000 006D ...)',
-				},
+				irOption,
 				{
 					type: 'number',
 					label: 'Repeat count (0 = as captured)',
@@ -62,12 +69,29 @@ export function UpdateActions(instance: GlobalCacheItachInstance): void {
 				try {
 					code = withRepeat(parseIrCode(opt.ir), opt.repeat)
 				} catch (err) {
-					if (!(err instanceof IrCodeError)) throw err
-					instance.recordResult({ ok: false, status: 'invalid', error: err.message, port, attempts: 0, latencyMs: 0 })
+					recordInvalid(instance, port, err)
 					return
 				}
 
 				await instance.client.sendIR(port, code)
+			},
+		},
+
+		startHold: {
+			name: 'Start IR hold',
+			description: 'Refresh short IR bursts until Stop IR is run. Pair with Stop IR on button release.',
+			options: [portOption, irOption],
+			callback: ({ options }) => {
+				const port = toPort(options.portNum)
+				if (port === undefined) {
+					instance.log('error', `Start IR hold: invalid port "${options.portNum}"`)
+					return
+				}
+				try {
+					instance.client.startHold(port, parseIrCode(options.ir))
+				} catch (err) {
+					recordInvalid(instance, port, err)
+				}
 			},
 		},
 
@@ -79,7 +103,7 @@ export function UpdateActions(instance: GlobalCacheItachInstance): void {
 			callback: (action) => {
 				const port = toPort(action.options.portNum)
 				if (port === undefined) return
-				if (!instance.client.stopIR(port)) instance.log('debug', `Stop IR on port ${port}: not connected`)
+				if (!instance.client.stopIR(port)) instance.log('debug', `Stop IR could not be sent on port ${port}`)
 			},
 		},
 
@@ -117,7 +141,10 @@ export function UpdateActions(instance: GlobalCacheItachInstance): void {
 				const command = action.options.command?.trim()
 				if (!command) return
 				if (!instance.client.sendRaw(command))
-					instance.log('warn', `Raw command not sent, device not connected: ${command}`)
+					instance.log(
+						'warn',
+						`Raw command needs a connected device. On a GC-100 the connection must also be idle: ${command}`,
+					)
 			},
 		},
 	})

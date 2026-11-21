@@ -19,7 +19,7 @@ test('parses device responses', () => {
 	assert.equal(parseResponse('endlistdevices').type, 'endDevices')
 	assert.equal(parseResponse('stopir,1:1').type, 'stopped')
 	assert.deepEqual(parseResponse('710-1005-05'), { type: 'version', text: '710-1005-05' })
-	assert.deepEqual(parseResponse('version,0,3.0-12'), { type: 'version', text: '3.0-12' })
+	assert.deepEqual(parseResponse('version,0,3.0-12'), { type: 'version', module: 0, text: '3.0-12' })
 	assert.deepEqual(parseResponse('IR,1:1,IR'), { type: 'other', text: 'IR,1:1,IR' })
 })
 

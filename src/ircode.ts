@@ -11,6 +11,7 @@ export interface IrCode {
 	repeat: number
 	offset: number
 	pulses: number[]
+	compressedPulses?: string
 }
 
 export const LIMITS = {
@@ -19,6 +20,9 @@ export const LIMITS = {
 	minRepeat: 1,
 	maxRepeat: 50,
 	maxPulse: 65535,
+	maxPulseValues: 520,
+	maxRepeatOffset: 383,
+	minPulseUs: 80,
 }
 
 // The Pronto carrier word is expressed in units of this many microseconds
@@ -52,21 +56,51 @@ function parseGlobalCache(text: string): IrCode {
 
 	body = body.replace(/,+$/, '')
 
-	if (!/^\d+(,\d+)+$/.test(body)) {
-		throw new IrCodeError('IR code may only contain numbers separated by commas')
+	// Older saved codes can start with a leftover command ID. The second field
+	// of a normal body is a repeat count, so it cannot be a carrier frequency.
+	const legacy = header ? null : body.match(/^(\d+),(\d+),/)
+	if (legacy && Number(legacy[1]) <= 65535 && isFrequency(Number(legacy[2]))) body = body.slice(legacy[1].length + 1)
+
+	const fields = body.match(/^(\d+),(\d+),(\d+),(.+)$/)
+	if (!fields) throw new IrCodeError('IR code must contain numbers separated by commas or compressed pulse pairs')
+	const [, frequency, repeat, offset, payload] = fields
+	const compressed = /[A-Z]/.test(payload)
+	if (!compressed && !/^\d+(,\d+)*$/.test(payload)) {
+		throw new IrCodeError('IR code must contain numbers separated by commas or compressed pulse pairs')
 	}
+	const pulses = compressed ? expandPulsePairs(payload) : payload.split(',').map(Number)
+	return validate({
+		frequency: Number(frequency),
+		repeat: Number(repeat),
+		offset: Number(offset),
+		pulses,
+		...(compressed ? { compressedPulses: payload } : {}),
+	})
+}
 
-	const values = body.split(',').map((v) => Number(v))
+function expandPulsePairs(payload: string): number[] {
+	const dictionary: [number, number][] = []
+	const pulses: number[] = []
+	const token = /([A-O])|(\d+),(\d+)(?:,(?=\d)|(?=[A-O]|$))/y
 
-	// "<id>,<freq>,..." (sendir header only partly removed, or entered that way to
-	// work around older versions of this module): a valid frequency is never
-	// below 15000, so a small first value followed by a valid frequency is an ID
-	if (values.length > 1 && values[0] < LIMITS.minFrequency && isFrequency(values[1])) values.shift()
+	while (token.lastIndex < payload.length) {
+		const match = token.exec(payload)
+		if (!match) throw new IrCodeError('Invalid compressed IR pulse pair')
 
-	if (values.length < 5) throw new IrCodeError('IR code is too short')
-
-	const [frequency, repeat, offset, ...pulses] = values
-	return validate({ frequency, repeat, offset, pulses })
+		if (match[1]) {
+			const pair = dictionary[match[1].charCodeAt(0) - 65]
+			if (!pair) throw new IrCodeError(`Undefined compressed IR pulse pair ${match[1]}`)
+			pulses.push(...pair)
+		} else {
+			const on = Number(match[2])
+			const off = Number(match[3])
+			if (dictionary.length < 15 && !dictionary.some(([a, b]) => a === on && b === off)) dictionary.push([on, off])
+			pulses.push(on, off)
+		}
+		if (pulses.length > LIMITS.maxPulseValues)
+			throw new IrCodeError(`IR code exceeds ${LIMITS.maxPulseValues} pulse values`)
+	}
+	return pulses
 }
 
 function parseProntoHex(text: string): IrCode {
@@ -109,16 +143,22 @@ function validate(code: IrCode): IrCode {
 	if (pulses.length === 0 || pulses.length % 2 !== 0) {
 		throw new IrCodeError(`IR code must contain on/off pairs, but has ${pulses.length} pulse values`)
 	}
+	if (pulses.length > LIMITS.maxPulseValues)
+		throw new IrCodeError(`IR code exceeds ${LIMITS.maxPulseValues} pulse values`)
 	if (offset < 1 || offset % 2 !== 1 || offset >= pulses.length) {
 		throw new IrCodeError(`Offset ${offset} must be odd and point inside the ${pulses.length} pulse values`)
 	}
+	if (repeat > 1 && offset > LIMITS.maxRepeatOffset) {
+		throw new IrCodeError(`Repeat offset ${offset} exceeds ${LIMITS.maxRepeatOffset}`)
+	}
+	const minPulse = Math.ceil((frequency * LIMITS.minPulseUs) / 1_000_000)
 	for (const pulse of pulses) {
-		if (pulse < 1 || pulse > LIMITS.maxPulse) {
-			throw new IrCodeError(`Pulse value ${pulse} is out of range (1-${LIMITS.maxPulse})`)
+		if (pulse < minPulse || pulse > LIMITS.maxPulse) {
+			throw new IrCodeError(`Pulse value ${pulse} is out of range (${minPulse}-${LIMITS.maxPulse}) at ${frequency} Hz`)
 		}
 	}
 
-	return { frequency, repeat, offset, pulses }
+	return code
 }
 
 export function withRepeat(code: IrCode, repeat: number | undefined): IrCode {
@@ -127,7 +167,7 @@ export function withRepeat(code: IrCode, repeat: number | undefined): IrCode {
 	if (!(value >= LIMITS.minRepeat && value <= LIMITS.maxRepeat)) {
 		throw new IrCodeError(`Repeat count ${repeat} is out of range (${LIMITS.minRepeat}-${LIMITS.maxRepeat})`)
 	}
-	return { ...code, repeat: value }
+	return validate({ ...code, repeat: value })
 }
 
 /** How long the iTach needs to transmit the code, in milliseconds */
@@ -139,5 +179,5 @@ export function transmitDurationMs(code: IrCode): number {
 
 /** The part of a sendir command after the ID */
 export function formatIrCode(code: IrCode): string {
-	return [code.frequency, code.repeat, code.offset, ...code.pulses].join(',')
+	return [code.frequency, code.repeat, code.offset, code.compressedPulses ?? code.pulses.join(',')].join(',')
 }

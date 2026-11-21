@@ -23,7 +23,7 @@ Download the free iLearn and iHelp utilities from [Global Caché Support Downloa
 
 Paste the code into the **Send IR code** action. These formats are accepted:
 
-- Global Caché code: `38000,1,1,342,171,21,64,...`
+- Global Caché code (numeric or compressed): `38000,1,1,342,171,21,64,...`
 - The full line from iLearn, including the header: `sendir,1:1,1,38000,1,1,...` (the header is removed automatically)
 - Learned Pronto hex: `0000 006D 0022 0002 ...`
 
@@ -34,12 +34,13 @@ Codes saved with earlier versions of this module keep working. Spaces and line b
 ### Actions
 
 - **Send IR code**: transmits a code on a port. The action completes once the iTach confirms the code was sent, so in a sequential action group the next step waits for it. Use _Repeat count_ for devices that need a code sent more than once to react.
-- **Stop IR**: stops the code transmitting on a port and discards any waiting codes.
+- **Start IR hold**: sends short IR bursts for as long as the button is held. Pair it with **Stop IR** on release.
+- **Stop IR**: discards waiting codes and asks the device to stop the active transmission. The module waits for the device’s acknowledgment. A device that does not acknowledge the stop, such as a GC-100, causes the module to reconnect.
 - **Clear queued codes**: discards codes waiting on every port.
 - **Reconnect**: drops and re-opens the connection.
-- **Send raw command (advanced)**: sends any Global Caché API command, e.g. `get_IR,1:1`.
+- **Send raw command (advanced)**: sends a Global Caché API command. On a GC-100, wait for IR delivery to finish before sending a raw command. Find replies in the module log.
 
-**Hold to repeat (e.g. volume):** add _Send IR code_ with a repeat count of 50 on press and _Stop IR_ on release. The **Hold to repeat** presets are set up this way.
+**Hold to repeat (e.g. volume):** use _Start IR hold_ on press and _Stop IR_ on release. The module refreshes a burst of three repeats while held. If the connection drops, the device can finish the remaining repeats in the last burst. Release and press the button again after reconnecting. For an older copied preset, replace its press action with _Start IR hold_ and keep the same IR code and release action.
 
 ### How delivery works
 

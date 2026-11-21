@@ -13,10 +13,13 @@ export class FakeItach {
 		this.busyCount = 0 // answer the next N sendir with busyIR
 		this.errorCode = null // answer sendir with ERR_1:<port>,<code>
 		this.swallowSendir = false // never confirm sendir
+		this.stopDelayMs = 0
+		this.ignoreStop = false
 		this.portlessError = false // send ERR_<code> without a connector
 		this.rawReplies = {} // exact command line -> reply, for raw commands
 		this.devices = ['device,0,0 ETHERNET', 'device,1,3 IR']
 		this.ignoreDeviceList = false
+		this.firmwareReply = '710-1005-05'
 		this.timers = new Set()
 	}
 
@@ -59,7 +62,7 @@ export class FakeItach {
 		this.received.push(line)
 		if (this.silent) return
 
-		if (line === 'getversion') return this._reply(socket, '710-1005-05')
+		if (line === 'getversion' || line === 'getversion,0') return this._reply(socket, this.firmwareReply)
 		if (line === 'getdevices') {
 			if (!this.ignoreDeviceList) this._replyWithDevices(socket)
 			return
@@ -79,7 +82,10 @@ export class FakeItach {
 			if (this.swallowSendir) return
 			return this._later(this.transmitMs, () => this._reply(socket, `completeir,${mod}:${port},${id}`))
 		}
-		if (/^stopir,\d+:\d+$/.test(line)) return this._reply(socket, line)
+		if (/^stopir,\d+:\d+$/.test(line)) {
+			if (!this.ignoreStop) this._later(this.stopDelayMs, () => this._reply(socket, line))
+			return
+		}
 
 		if (Object.prototype.hasOwnProperty.call(this.rawReplies, line)) return this._reply(socket, this.rawReplies[line])
 		this._reply(socket, 'ERR_01')

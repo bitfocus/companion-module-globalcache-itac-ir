@@ -103,6 +103,7 @@ test('instance connects, sends codes and reports results', async (t) => {
 	)
 	assert.match(host.presets.status.style.text, /globalcache-itac-ir:connection_status/)
 	assert.equal(host.presets.hold_1.type, 'simple')
+	assert.equal(host.presets.hold_1.steps[0].down[0].actionId, 'startHold')
 	assert.equal(host.presets.hold_1.steps[0].up[0].actionId, 'stopIR')
 	assert.ok(host.variableDefinitions.firmware_version)
 	assert.equal(UpgradeScripts.length, 2)
