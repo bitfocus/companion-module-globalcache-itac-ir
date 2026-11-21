@@ -172,6 +172,49 @@ test('publishes an idle reconnect immediately and keeps discovered port choices'
 	assert.deepEqual(device.sendirs(), [])
 })
 
+test('learns into both IR actions and publishes the actual connector modes', async (t) => {
+	const device = new FakeItach()
+	device.portModes = { '1:2': 'SENSOR', '1:3': 'IR_BLASTER' }
+	device.learnedCode = 'sendir,1:1,1,38000,1,1,342,171,21,64'
+	await device.listen()
+	const { instance, host } = createInstance(t)
+	t.after(async () => {
+		await instance.destroy()
+		await device.close()
+	})
+
+	assert.equal(
+		instance.getConfigFields().some((field) => field.id === 'port'),
+		false,
+	)
+	await instance.init({ host: '127.0.0.1', port: device.port })
+	await waitFor(() => host.variables.connection_status === 'Connected')
+	assert.ok(host.variableDefinitions.port_1_mode)
+	assert.equal(host.variables.port_1_mode, 'IR')
+	assert.equal(host.variables.port_2_mode, 'SENSOR')
+	assert.equal(host.variables.port_3_mode, 'IR_BLASTER')
+	const sensorSend = await instance.client.sendIR(2, {
+		frequency: 38000,
+		repeat: 1,
+		offset: 1,
+		pulses: [342, 171],
+	})
+	assert.equal(sensorSend.status, 'rejected')
+	assert.match(sensorSend.error, /SENSOR mode/)
+	assert.deepEqual(device.sendirs(), [])
+
+	const context = { signal: new AbortController().signal }
+	const action = { options: { portNum: '3', repeat: 4, ir: 'previous code' } }
+	for (const { learn } of [host.actions.portSet, host.actions.startHold]) {
+		assert.deepEqual(await learn(action, context), { ir: '38000,1,1,342,171,21,64' })
+	}
+	await waitFor(() => device.received.filter((line) => line === 'stop_IRL').length === 2)
+	assert.deepEqual(device.sendirs(), [])
+	device.dropAll()
+	await waitFor(() => host.variables.connection_status === 'Disconnected')
+	assert.equal(host.variables.port_2_mode, '')
+})
+
 test('instance without an IP address reports bad config', async (t) => {
 	const { instance, host } = createInstance(t)
 	t.after(() => instance.destroy())

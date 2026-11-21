@@ -5,12 +5,18 @@ Control projectors, displays and other IR devices through a Global Caché iTach 
 ### Setup
 
 1. Enter the **IP address** of the iTach. Find it with the iHelp utility or in your router's DHCP client list. Give the iTach a fixed IP or a DHCP reservation so it can't move.
-2. Leave **TCP Port** at 4998 and **IR Module Address** at 1 for an iTach.
-3. After connecting, the log lists the modules the device reports. The selected IR module’s port count determines the port choices and presets. You can still enter a port number manually. If the module address doesn't point to an IR module, the connection shows a warning.
+2. Leave **IR Module Address** at 1 for an iTach. The module connects on TCP port 4998.
+3. After connecting, the log lists the modules the device reports. The selected IR module’s port count determines the port choices and presets. You can still enter a port number manually. If the module address doesn't point to an IR module, the connection shows a warning. On an iTach, the module also reads each connector’s mode and rejects IR sends to connectors configured as inputs or for LED lighting.
 
 ### Capturing IR codes
 
-Download the free iLearn and iHelp utilities from [Global Caché Support Downloads](https://www.globalcache.com/downloads/). Mac versions are available from [http://www.rmartijnr.eu/](http://www.rmartijnr.eu/).
+1. Add a **Send IR code** or **Start IR hold** action and click **Learn Values**.
+2. Hold the remote within about an inch (2.5 cm) of the iTach’s onboard learner and press the button you want to capture.
+3. Review the captured **IR Code**. Learning updates only that field, so your selected port and repeat settings stay in place.
+
+Learn on an idle connection. LED lighting mode can make the iTach learner unavailable.
+
+You can also use iLearn to capture and paste a code. Download the free iLearn and iHelp utilities from [Global Caché Support Downloads](https://www.globalcache.com/downloads/). Mac versions are available from [http://www.rmartijnr.eu/](http://www.rmartijnr.eu/).
 
 1. Select the device type you're learning from in the IR Learner dropdown menu (Autodetect Type).
 2. Enter the IP address of the Global Caché device and press **Connect**.
@@ -58,7 +64,7 @@ Codes saved with earlier versions of this module keep working. Spaces and line b
 ### Feedbacks and variables
 
 - **Device connected**, **Port sending**, and **Last code failed** feedbacks.
-- Variables: `connection_status`, `firmware_version`, `queue_depth`, `last_port`, `last_result`, `last_error`, `last_latency_ms`, `sent_total`, `failed_total`, `reconnects`.
+- Variables: `connection_status`, `firmware_version`, `queue_depth`, `last_port`, `last_result`, `last_error`, `last_latency_ms`, `sent_total`, `failed_total`, `reconnects`, and `port_N_mode` for each discovered connector. Mode values are empty until the device responds.
 
 The **Status** preset shows the connection state, turns red when a code fails, and reconnects when pressed. Each port has a group containing its **Send**, **Hold to repeat**, and **Stop** presets.
 

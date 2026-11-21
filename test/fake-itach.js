@@ -20,6 +20,9 @@ export class FakeItach {
 		this.devices = ['device,0,0 ETHERNET', 'device,1,3 IR']
 		this.ignoreDeviceList = false
 		this.firmwareReply = '710-1005-05'
+		this.portModes = {}
+		this.learnedCode = null
+		this.learnerUnavailable = false
 		this.timers = new Set()
 	}
 
@@ -63,6 +66,13 @@ export class FakeItach {
 		if (this.silent) return
 
 		if (line === 'getversion' || line === 'getversion,0') return this._reply(socket, this.firmwareReply)
+		if (line === 'get_IRL') {
+			if (this.learnerUnavailable) return this._reply(socket, 'IR Learner Unavailable')
+			this._reply(socket, 'IR Learner Enabled')
+			if (this.learnedCode) this._later(10, () => this._reply(socket, this.learnedCode))
+			return
+		}
+		if (line === 'stop_IRL') return this._reply(socket, 'IR Learner Disabled')
 		if (line === 'getdevices') {
 			if (!this.ignoreDeviceList) this._replyWithDevices(socket)
 			return
@@ -88,6 +98,10 @@ export class FakeItach {
 		}
 
 		if (Object.prototype.hasOwnProperty.call(this.rawReplies, line)) return this._reply(socket, this.rawReplies[line])
+		if ((m = line.match(/^get_IR,(\d+:\d+)$/))) {
+			const address = m[1]
+			return this._reply(socket, `IR,${address},${this.portModes[address] ?? 'IR'}`)
+		}
 		this._reply(socket, 'ERR_01')
 	}
 

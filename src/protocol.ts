@@ -21,6 +21,7 @@ type DeviceResponse =
 	| DeviceError
 	| { type: 'complete' | 'busy'; module: number; port: number; id: number }
 	| { type: 'stopped'; module: number; port: number }
+	| { type: 'portMode'; module: number; port: number; mode: string }
 	| { type: 'endDevices' }
 	| { type: 'version'; text: string; module?: number }
 	| { type: 'other'; text: string }
@@ -85,6 +86,9 @@ export function parseResponse(line: string): DeviceResponse {
 	}
 	if ((m = line.match(/^stopir,(\d+):(\d+)$/i))) {
 		return { type: 'stopped', module: Number(m[1]), port: Number(m[2]) }
+	}
+	if ((m = line.match(/^IR,(\d+):(\d+),([A-Z0-9_]+)$/i))) {
+		return { type: 'portMode', module: Number(m[1]), port: Number(m[2]), mode: m[3].toUpperCase() }
 	}
 	if ((m = line.match(/^device,(\d+),(\d+)\s+(\S+)/i))) {
 		return { type: 'device', module: Number(m[1]), ports: Number(m[2]), kind: m[3].toUpperCase() }

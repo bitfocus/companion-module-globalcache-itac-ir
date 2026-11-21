@@ -3,8 +3,13 @@ import { CONFIG_DEFAULTS, GetConfigFields, type ModuleConfig } from './config.js
 import { UpdateActions, type ActionsSchema } from './actions.js'
 import { UpdateFeedbacks, type FeedbacksSchema } from './feedbacks.js'
 import { UpdatePresets } from './presets.js'
-import { UpdateStatsVariables, UpdateVariableDefinitions, type VariablesSchema } from './variables.js'
-import { ItachClient, type ClientState, type DeliveryResult, type StateInfo } from './itach.js'
+import {
+	UpdatePortModeVariables,
+	UpdateStatsVariables,
+	UpdateVariableDefinitions,
+	type VariablesSchema,
+} from './variables.js'
+import { ITACH_TCP_PORT, ItachClient, type ClientState, type DeliveryResult, type StateInfo } from './itach.js'
 
 export { UpgradeScripts } from './upgrades.js'
 
@@ -49,6 +54,7 @@ export default class GlobalCacheItachInstance extends InstanceBase<ModuleSchema>
 		UpdateActions(this)
 		UpdateFeedbacks(this)
 		UpdatePresets(this)
+		UpdateVariableDefinitions(this)
 	}
 
 	getConfigFields(): SomeCompanionConfigField[] {
@@ -56,7 +62,6 @@ export default class GlobalCacheItachInstance extends InstanceBase<ModuleSchema>
 	}
 
 	async init(config: ModuleConfig): Promise<void> {
-		UpdateVariableDefinitions(this)
 		this.updatePortDefinitions()
 
 		await this.configUpdated(config)
@@ -74,7 +79,8 @@ export default class GlobalCacheItachInstance extends InstanceBase<ModuleSchema>
 		this.stopClient()
 
 		const previous = this.client.options
-		if (previous.host !== cfg.host || previous.port !== cfg.port || previous.moduleAddress !== cfg.moduleAddress) {
+		const port = cfg.port ?? ITACH_TCP_PORT
+		if (previous.host !== cfg.host || previous.port !== port || previous.moduleAddress !== cfg.moduleAddress) {
 			this.lastDeviceInventory = undefined
 			this.lastDeviceProblem = undefined
 			this.setPortCount(DEFAULT_PORT_COUNT)
@@ -83,7 +89,7 @@ export default class GlobalCacheItachInstance extends InstanceBase<ModuleSchema>
 		this.lastDisconnectMessage = undefined
 		this.client = new ItachClient({
 			host: cfg.host,
-			port: cfg.port,
+			port,
 			moduleAddress: cfg.moduleAddress,
 			maxCommandAge: cfg.maxCommandAge,
 			retries: cfg.retries,
@@ -106,6 +112,7 @@ export default class GlobalCacheItachInstance extends InstanceBase<ModuleSchema>
 			reconnects: 0,
 		})
 		UpdateStatsVariables(this)
+		UpdatePortModeVariables(this)
 		this.checkAllFeedbacks()
 
 		this.client.on('state', (state, message, info) => this.onClientState(state, message, info))
@@ -161,6 +168,7 @@ export default class GlobalCacheItachInstance extends InstanceBase<ModuleSchema>
 			reconnects: this.client.stats.reconnects,
 			...(state === 'disconnected' || state === 'connecting' ? { firmware_version: '' } : {}),
 		})
+		UpdatePortModeVariables(this)
 		this.checkFeedbacks('connected')
 
 		switch (state) {

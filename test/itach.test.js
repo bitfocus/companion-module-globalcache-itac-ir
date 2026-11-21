@@ -634,6 +634,30 @@ test('a raw command reply is not stored as the firmware version', async (t) => {
 	assert.equal(client.version, '710-1005-05')
 })
 
+test('cancels a learn on its socket and resumes the managed queue', async (t) => {
+	const { device, client } = await setup(t, { keepaliveInterval: 30 })
+	const controller = new AbortController()
+	const learned = client.learnIR(controller.signal)
+	await waitFor(() => device.received.includes('get_IRL'))
+	await assert.rejects(client.learnIR(controller.signal), /already in progress/)
+	const count = device.received.filter((line) => line === 'getversion').length
+	const queued = client.sendIR(1, CODE)
+	await sleep(80)
+	assert.equal(device.sendirs().length, 0)
+	assert.equal(device.received.filter((line) => line === 'getversion').length, count)
+	controller.abort()
+	await assert.rejects(learned, /cancelled/)
+	assert.equal((await queued).status, 'complete')
+	await waitFor(() => device.received.includes('stop_IRL'))
+})
+
+test('reports an unavailable learner and leaves ordinary delivery usable', async (t) => {
+	const { device, client } = await setup(t)
+	device.learnerUnavailable = true
+	await assert.rejects(client.learnIR(new AbortController().signal), /IR learner is unavailable.*LED lighting/)
+	assert.equal((await client.sendIR(1, CODE)).status, 'complete')
+})
+
 test('a manual reconnect is not counted or reported as a failure', async (t) => {
 	const { client } = await setup(t)
 	const states = []

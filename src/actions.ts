@@ -1,5 +1,6 @@
 import type { CompanionInputFieldDropdown, CompanionInputFieldTextInput } from '@companion-module/base'
 import { parseIrCode, withRepeat, IrCodeError } from './ircode.js'
+import { IR_LEARN_TIMEOUT } from './learner.js'
 import type GlobalCacheItachInstance from './main.js'
 
 export type ActionsSchema = {
@@ -37,12 +38,17 @@ export function UpdateActions(instance: GlobalCacheItachInstance): void {
 		useVariables: true,
 		label: 'IR Code',
 		id: 'ir',
-		tooltip: 'Global Caché (numeric or compressed), a full sendir line, or learned Pronto hex',
+		tooltip: 'Use Learn Values or paste a Global Caché code, a full sendir line, or learned Pronto hex',
 	}
 
+	const learn = async (_action: unknown, { signal }: { signal: AbortSignal }) => ({
+		ir: await instance.client.learnIR(signal),
+	})
 	instance.setActionDefinitions({
 		portSet: {
 			name: 'Send IR code',
+			learn,
+			learnTimeout: IR_LEARN_TIMEOUT + 5000,
 			description: 'Transmit a learned IR code. Waits until the device confirms the code was sent.',
 			options: [
 				portOption,
@@ -79,6 +85,8 @@ export function UpdateActions(instance: GlobalCacheItachInstance): void {
 
 		startHold: {
 			name: 'Start IR hold',
+			learn,
+			learnTimeout: IR_LEARN_TIMEOUT + 5000,
 			description: 'Refresh short IR bursts until Stop IR is run. Pair with Stop IR on button release.',
 			options: [portOption, irOption],
 			callback: ({ options }) => {

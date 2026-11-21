@@ -11,6 +11,7 @@ export type VariablesSchema = {
 	sent_total: number
 	failed_total: number
 	reconnects: number
+	[id: `port_${number}_mode`]: string
 }
 
 export function UpdateVariableDefinitions(instance: GlobalCacheItachInstance): void {
@@ -25,6 +26,9 @@ export function UpdateVariableDefinitions(instance: GlobalCacheItachInstance): v
 		sent_total: { name: 'Codes confirmed sent' },
 		failed_total: { name: 'Codes failed' },
 		reconnects: { name: 'Reconnections since start' },
+		...Object.fromEntries(
+			instance.portChoices.map(({ id, label }) => [`port_${id}_mode`, { name: `${label} connector mode` }]),
+		),
 	})
 }
 
@@ -35,4 +39,13 @@ export function UpdateStatsVariables(instance: GlobalCacheItachInstance): void {
 		sent_total: stats.completed,
 		failed_total: stats.failed + instance.invalidCount,
 	})
+}
+
+export function UpdatePortModeVariables(instance: GlobalCacheItachInstance): void {
+	const values: Partial<VariablesSchema> = {}
+	for (const { id } of instance.portChoices) {
+		const port = Number(id)
+		values[`port_${port}_mode`] = instance.client.portMode(port) ?? ''
+	}
+	instance.setVariableValues(values)
 }

@@ -22,6 +22,7 @@
 //     power or network without closing the socket is detected and reconnected.
 
 import { Socket } from 'node:net'
+import { learnIrCode } from './learner.js'
 import { EventEmitter } from 'node:events'
 import { parseResponse, LineSplitter, type DeviceError, type DeviceInfo } from './protocol.js'
 import { formatIrCode, transmitDurationMs, withRepeat, type IrCode } from './ircode.js'
@@ -71,9 +72,11 @@ interface ClientEvents {
 	version: [version: string]
 }
 
+export const ITACH_TCP_PORT = 4998
+
 const DEFAULTS = {
 	host: '',
-	port: 4998,
+	port: ITACH_TCP_PORT,
 	moduleAddress: 1,
 	connectTimeout: 5000,
 	reconnectMin: 1000,
@@ -91,6 +94,7 @@ const DEFAULTS = {
 
 const MAX_ID = 65535
 const HOLD_REPEATS = 3
+const NON_TRANSMITTING_MODES = new Set(['SENSOR', 'SENSOR_NOTIFY', 'LED_LIGHTING', 'SERIAL', 'RECEIVER'])
 
 export class ItachClient extends EventEmitter<ClientEvents> {
 	readonly options: typeof DEFAULTS
@@ -102,6 +106,9 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	private running = false
 	private socket: Socket | null = null
 	private rawSocket?: Socket
+	private modeSocket?: Socket
+	private readonly portModes = new Map<number, string>()
+	private learner?: AbortController
 	private legacyGc100 = false
 	private legacyRawTimer?: NodeJS.Timeout
 	private readonly splitter = new LineSplitter()
@@ -158,6 +165,29 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		return this.state === 'connected'
 	}
 
+	portMode(port: number): string | undefined {
+		return this.portModes.get(port)
+	}
+
+	async learnIR(signal: AbortSignal): Promise<string> {
+		signal.throwIfAborted()
+		if (!this.connected) throw new Error('Connect to the iTach before learning an IR code')
+		if (this.legacyGc100) throw new Error('The GC-100 has no onboard IR learner')
+		if (this.learner) throw new Error('IR learning is already in progress')
+		if (this.probe || this.queueDepth() || [...this.ports.values()].some((p) => p.stopTimer)) {
+			throw new Error('Wait until the connection is idle before learning an IR code')
+		}
+
+		const learner = new AbortController()
+		this.learner = learner
+		try {
+			return await learnIrCode(this.options.host, this.options.port, AbortSignal.any([signal, learner.signal]))
+		} finally {
+			this.learner = undefined
+			for (const port of this.ports.keys()) this._pump(port)
+		}
+	}
+
 	// ----------------------------------------------------------------- commands
 
 	/**
@@ -192,7 +222,9 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 			}
 
 			if (!this.running) return this._finish(cmd, false, 'rejected', 'No device configured')
-			if (hold && !this.connected) return this._finish(cmd, false, 'rejected', 'Cannot start a hold while disconnected')
+			if (hold && (!this.connected || this.learner)) {
+				return this._finish(cmd, false, 'rejected', 'Cannot start a hold while disconnected or learning IR')
+			}
 
 			const p = this._port(port)
 			if (hold && (p.inflight?.hold || p.waiting?.cmd.hold || p.queue.some((item) => item.hold))) {
@@ -212,7 +244,8 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		const p = this._port(port)
 		this._cancelQueued(p, 'Cancelled by Stop IR')
 		this.emit('queue')
-		if (!this.connected || this.legacyRawTimer) return false
+		if (!this.connected || this.legacyRawTimer || this.learner) return false
+		if (NON_TRANSMITTING_MODES.has(this.portModes.get(port) ?? '')) return false
 		if (p.stopTimer) return true
 
 		if (p.inflight) {
@@ -237,7 +270,7 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 	/** Keep raw command replies off the socket used for managed IR delivery. */
 	sendRaw(line: string): boolean {
-		if (!this.connected) return false
+		if (!this.connected || this.learner) return false
 		if (this.legacyGc100) return this._sendLegacyRaw(line)
 		const socket = this.rawSocket ?? this._connectRawSocket()
 		socket.write(line + '\r')
@@ -360,6 +393,11 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 		this.rawSocket?.destroy()
 		this.rawSocket = undefined
+		const modeSocket = this.modeSocket
+		this.modeSocket = undefined
+		modeSocket?.destroy()
+		this.portModes.clear()
+		this.learner?.abort()
 		clearTimeout(this.legacyRawTimer)
 		this.legacyRawTimer = undefined
 
@@ -397,6 +435,51 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 	private _finishDiscovery() {
 		this.discovery = undefined
+		const device = this.devices?.find((device) => device.module === this.options.moduleAddress)
+		// Use a separate connection so a late mode error cannot settle a send.
+		// GC-100 only allows one TCP connection.
+		if (!this.legacyGc100 && device && /IR/.test(device.kind) && device.ports > 0 && device.ports <= 255) {
+			this._readPortModes(device)
+		} else {
+			this._markConnected()
+		}
+	}
+
+	private _readPortModes(device: DeviceInfo) {
+		const socket = new Socket()
+		const splitter = new LineSplitter()
+		const pending = new Set(Array.from({ length: device.ports }, (_, index) => index + 1))
+		this.modeSocket = socket
+
+		const finish = () => {
+			clearTimeout(timer)
+			if (this.modeSocket !== socket) return
+			this.modeSocket = undefined
+			socket.destroy()
+			this._markConnected()
+		}
+		const timer = setTimeout(finish, this.options.responseTimeout)
+		socket.once('connect', () => {
+			for (const port of pending) socket.write(`get_IR,${device.module}:${port}\r`)
+		})
+		socket.on('data', (chunk) => {
+			if (this.modeSocket !== socket) return
+			for (const line of splitter.push(chunk)) {
+				const response = parseResponse(line)
+				if (response.type === 'portMode' && response.module === device.module && pending.delete(response.port)) {
+					this.portModes.set(response.port, response.mode)
+				} else if (response.type === 'error' && response.module === device.module && response.port !== undefined) {
+					pending.delete(response.port)
+				}
+			}
+			if (!pending.size) finish()
+		})
+		socket.on('error', finish)
+		socket.once('close', finish)
+		socket.connect(this.options.port, this.options.host)
+	}
+
+	private _markConnected() {
 		this.reconnectDelay = this.options.reconnectMin
 		const { host, port } = this.options
 		this._setState('connected', `Connected to ${host}:${port}`)
@@ -411,7 +494,7 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 	private _tick() {
 		const now = Date.now()
-		if (this.legacyRawTimer) return
+		if (this.legacyRawTimer || this.modeSocket || this.learner) return
 		if (this.discovery) {
 			if (now - this.discovery.startedAt >= this.options.responseTimeout) {
 				if (this.discovery.sawVersion || this.discovery.sawDeviceList) {
@@ -526,6 +609,8 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 					this.discovery.sawDeviceList = true
 					if (this.discovery.sawVersion) this._finishDiscovery()
 				}
+				return
+			case 'portMode':
 				return
 			case 'stopped':
 				if (res.module === this.options.moduleAddress) this._handleStopped(res.port)
@@ -713,13 +798,18 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	private _pump(port: number) {
 		const p = this._port(port)
 		this._syncQueueExpiry(p)
-		if (!this.connected || p.inflight || p.waiting || p.stopTimer || this.legacyRawTimer) return
+		if (!this.connected || p.inflight || p.waiting || p.stopTimer || this.legacyRawTimer || this.learner) return
 
 		let queued = p.queue.shift()
 		while (queued) {
 			this._pauseExpiry(queued)
-			if (queued.ageRemaining > 0) break
-			this._expire(queued)
+			if (queued.ageRemaining <= 0) {
+				this._expire(queued)
+			} else {
+				const mode = this.portModes.get(port)
+				if (!mode || !NON_TRANSMITTING_MODES.has(mode)) break
+				this._finish(queued, false, 'rejected', `Port ${port} is in ${mode} mode and cannot transmit IR`)
+			}
 			queued = p.queue.shift()
 		}
 		if (!queued) {

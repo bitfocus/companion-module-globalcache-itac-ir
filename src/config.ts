@@ -2,7 +2,6 @@ import { Regex, type SomeCompanionConfigField } from '@companion-module/base'
 
 export const CONFIG_DEFAULTS = {
 	host: '',
-	port: 4998,
 	moduleAddress: 1,
 	maxCommandAge: 3000,
 	retries: 3,
@@ -11,7 +10,10 @@ export const CONFIG_DEFAULTS = {
 	responseTimeout: 2000,
 }
 
-export type ModuleConfig = typeof CONFIG_DEFAULTS
+export type ModuleConfig = typeof CONFIG_DEFAULTS & {
+	/** Retain explicitly saved ports for existing connections through TCP proxies. */
+	port?: number
+}
 
 export function GetConfigFields(): SomeCompanionConfigField[] {
 	return [
@@ -21,23 +23,14 @@ export function GetConfigFields(): SomeCompanionConfigField[] {
 			width: 12,
 			label: 'Information',
 			value:
-				'This module controls Global Caché IR interfaces such as the iTach IP2IR and WF2IR. Use the <a href="https://www.globalcache.com/support/ilearntutorial/" target="_new">iLearn App</a> to capture IR codes for your device.',
+				'This module controls Global Caché IR interfaces such as the iTach IP2IR and WF2IR. Use Learn Values in an IR action to capture a code from your remote.',
 		},
 		{
 			type: 'textinput',
 			id: 'host',
 			label: 'IP Address',
-			width: 6,
+			width: 9,
 			regex: Regex.IP,
-		},
-		{
-			type: 'number',
-			id: 'port',
-			label: 'TCP Port',
-			width: 3,
-			min: 1,
-			max: 65535,
-			default: CONFIG_DEFAULTS.port,
 		},
 		{
 			type: 'number',

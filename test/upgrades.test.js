@@ -23,7 +23,7 @@ test('v3 upgrade converts old port values and fills in new settings', () => {
 		repeat: literal(0),
 	})
 	assert.equal(result.updatedConfig.host, '10.0.0.5')
-	assert.equal(result.updatedConfig.port, 4998)
+	assert.equal(result.updatedConfig.port, undefined)
 	assert.equal(result.updatedConfig.retryUncertain, false)
 	assert.equal(result.updatedSecrets, null)
 })
