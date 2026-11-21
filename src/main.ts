@@ -1,13 +1,22 @@
 import { InstanceBase, InstanceStatus, type SomeCompanionConfigField } from '@companion-module/base'
 import { CONFIG_DEFAULTS, GetConfigFields, type ModuleConfig } from './config.js'
-import { UpdateActions } from './actions.js'
-import { UpdateFeedbacks } from './feedbacks.js'
+import { UpdateActions, type ActionsSchema } from './actions.js'
+import { UpdateFeedbacks, type FeedbacksSchema } from './feedbacks.js'
 import { UpdatePresets } from './presets.js'
-import { UpdateStatsVariables, UpdateVariableDefinitions } from './variables.js'
+import { UpdateStatsVariables, UpdateVariableDefinitions, type VariablesSchema } from './variables.js'
 import { ItachClient, type ClientState, type DeliveryResult, type StateInfo } from './itach.js'
-import type { GlobalCacheInstance, GlobalCacheTypes } from './types.js'
 
 export { UpgradeScripts } from './upgrades.js'
+
+export type ModuleSchema = {
+	config: ModuleConfig
+	secrets: undefined
+	actions: ActionsSchema
+	feedbacks: FeedbacksSchema
+	variables: VariablesSchema
+}
+
+const DEFAULT_PORT_COUNT = 3
 
 const STATE_LABELS = {
 	idle: 'Not configured',
@@ -16,15 +25,31 @@ const STATE_LABELS = {
 	disconnected: 'Disconnected',
 }
 
-export default class GlobalCacheItachInstance extends InstanceBase<GlobalCacheTypes> implements GlobalCacheInstance {
+export default class GlobalCacheItachInstance extends InstanceBase<ModuleSchema> {
 	client = new ItachClient()
 	lastResult: DeliveryResult | undefined
 	readonly lastResultByPort = new Map<number, DeliveryResult>()
 	invalidCount = 0
 
 	private clientState: ClientState = 'idle'
+	private portCount = DEFAULT_PORT_COUNT
+	private lastDeviceInventory?: string
+	private lastDeviceProblem?: string | null
 	private deviceWarning: string | null = null
 	private lastDisconnectMessage?: string
+
+	get portChoices(): { id: string; label: string }[] {
+		return Array.from({ length: this.portCount }, (_, index) => ({
+			id: String(index + 1),
+			label: `Port ${index + 1}`,
+		}))
+	}
+
+	private updatePortDefinitions() {
+		UpdateActions(this)
+		UpdateFeedbacks(this)
+		UpdatePresets(this)
+	}
 
 	getConfigFields(): SomeCompanionConfigField[] {
 		return GetConfigFields()
@@ -32,9 +57,7 @@ export default class GlobalCacheItachInstance extends InstanceBase<GlobalCacheTy
 
 	async init(config: ModuleConfig): Promise<void> {
 		UpdateVariableDefinitions(this)
-		UpdateActions(this)
-		UpdateFeedbacks(this)
-		UpdatePresets(this)
+		this.updatePortDefinitions()
 
 		await this.configUpdated(config)
 	}
@@ -50,6 +73,14 @@ export default class GlobalCacheItachInstance extends InstanceBase<GlobalCacheTy
 	private startClient(cfg: ModuleConfig) {
 		this.stopClient()
 
+		const previous = this.client.options
+		if (previous.host !== cfg.host || previous.port !== cfg.port || previous.moduleAddress !== cfg.moduleAddress) {
+			this.lastDeviceInventory = undefined
+			this.lastDeviceProblem = undefined
+			this.setPortCount(DEFAULT_PORT_COUNT)
+		}
+		this.clientState = 'idle'
+		this.lastDisconnectMessage = undefined
 		this.client = new ItachClient({
 			host: cfg.host,
 			port: cfg.port,
@@ -72,6 +103,7 @@ export default class GlobalCacheItachInstance extends InstanceBase<GlobalCacheTy
 			last_result: '',
 			last_error: '',
 			last_latency_ms: '',
+			reconnects: 0,
 		})
 		UpdateStatsVariables(this)
 		this.checkAllFeedbacks()
@@ -84,9 +116,17 @@ export default class GlobalCacheItachInstance extends InstanceBase<GlobalCacheTy
 		})
 		this.client.on('version', (version) => this.setVariableValues({ firmware_version: version }))
 		this.client.on('devices', (devices, problem) => {
-			this.log('info', `Device modules: ${devices.map((d) => `${d.module}:${d.kind}(${d.ports})`).join(', ')}`)
+			const inventory = devices.map((d) => `${d.module}:${d.kind}(${d.ports})`).join(', ')
+			if (inventory !== this.lastDeviceInventory) {
+				this.log('info', `Device modules: ${inventory}`)
+				this.lastDeviceInventory = inventory
+			}
+			if (problem && problem !== this.lastDeviceProblem) this.log('warn', problem)
+			this.lastDeviceProblem = problem
 			this.deviceWarning = problem
-			if (problem) this.log('warn', problem)
+
+			const count = devices.find((device) => device.module === cfg.moduleAddress)?.ports
+			if (!problem && count !== undefined && count >= 1 && count <= 255) this.setPortCount(count)
 			if (!this.client.connected) return
 			if (problem) this.updateStatus(InstanceStatus.UnknownWarning, problem)
 			else this.updateStatus(InstanceStatus.Ok)
@@ -101,6 +141,12 @@ export default class GlobalCacheItachInstance extends InstanceBase<GlobalCacheTy
 		this.client.start()
 	}
 
+	private setPortCount(count: number) {
+		if (count === this.portCount) return
+		this.portCount = count
+		this.updatePortDefinitions()
+	}
+
 	private stopClient() {
 		this.client.removeAllListeners()
 		this.client.stop()
@@ -110,7 +156,11 @@ export default class GlobalCacheItachInstance extends InstanceBase<GlobalCacheTy
 		const previous = this.clientState
 		this.clientState = state
 
-		this.setVariableValues({ connection_status: STATE_LABELS[state] ?? state })
+		this.setVariableValues({
+			connection_status: STATE_LABELS[state],
+			reconnects: this.client.stats.reconnects,
+			...(state === 'disconnected' || state === 'connecting' ? { firmware_version: '' } : {}),
+		})
 		this.checkFeedbacks('connected')
 
 		switch (state) {

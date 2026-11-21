@@ -1,22 +1,13 @@
 import type { CompanionInputFieldDropdown } from '@companion-module/base'
 import { parseIrCode, withRepeat, IrCodeError } from './ircode.js'
-import type { GlobalCacheInstance } from './types.js'
+import type GlobalCacheItachInstance from './main.js'
 
-export const PORT_CHOICES = [
-	{ id: '1', label: 'Port 1' },
-	{ id: '2', label: 'Port 2' },
-	{ id: '3', label: 'Port 3' },
-]
-
-const portOption: CompanionInputFieldDropdown<'portNum'> = {
-	type: 'dropdown',
-	label: 'Port',
-	id: 'portNum',
-	default: '1',
-	choices: PORT_CHOICES,
-	allowCustom: true,
-	regex: '/^\\d+$/',
-	tooltip: 'Type a number for ports beyond 3 (e.g. on a GC-100)',
+export type ActionsSchema = {
+	portSet: { options: { portNum: string; ir: string; repeat: number } }
+	stopIR: { options: { portNum: string } }
+	clearQueue: { options: Record<string, never> }
+	reconnect: { options: Record<string, never> }
+	sendRaw: { options: { command: string } }
 }
 
 export function toPort(value: string | number | undefined): number | undefined {
@@ -24,7 +15,17 @@ export function toPort(value: string | number | undefined): number | undefined {
 	return port >= 1 && port <= 255 ? port : undefined
 }
 
-export function UpdateActions(instance: GlobalCacheInstance): void {
+export function UpdateActions(instance: GlobalCacheItachInstance): void {
+	const portOption: CompanionInputFieldDropdown<'portNum'> = {
+		type: 'dropdown',
+		label: 'Port',
+		id: 'portNum',
+		default: '1',
+		choices: instance.portChoices,
+		allowCustom: true,
+		regex: '/^\\d+$/',
+		tooltip: 'Type a port number if it is not listed',
+	}
 	instance.setActionDefinitions({
 		portSet: {
 			name: 'Send IR code',

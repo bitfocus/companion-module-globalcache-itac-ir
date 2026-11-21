@@ -99,8 +99,9 @@ test('instance connects, sends codes and reports results', async (t) => {
 	assert.equal(Object.keys(host.presets).length, 10)
 	assert.deepEqual(
 		host.presetStructure[0].definitions.flatMap((group) => group.presets),
-		['status', 'send_1', 'send_2', 'send_3', 'hold_1', 'hold_2', 'hold_3', 'stop_1', 'stop_2', 'stop_3'],
+		['status', 'send_1', 'hold_1', 'stop_1', 'send_2', 'hold_2', 'stop_2', 'send_3', 'hold_3', 'stop_3'],
 	)
+	assert.match(host.presets.status.style.text, /globalcache-itac-ir:connection_status/)
 	assert.equal(host.presets.hold_1.type, 'simple')
 	assert.equal(host.presets.hold_1.steps[0].up[0].actionId, 'stopIR')
 	assert.ok(host.variableDefinitions.firmware_version)
@@ -128,6 +129,46 @@ test('a module warning clears when a later connection reports an IR module', asy
 	assert.equal(host.statuses.at(-1).status, InstanceStatus.Ok)
 	assert.equal(host.variables.reconnects, 0)
 	assert.ok(!host.logs.slice(seen).some((entry) => entry.message.startsWith('Disconnected')))
+})
+
+test('publishes an idle reconnect immediately and keeps discovered port choices', async (t) => {
+	const device = new FakeItach()
+	device.devices = ['device,0,0 ETHERNET', 'device,1,3 IR', 'device,4,2 IR']
+	await device.listen()
+	const { instance, host } = createInstance(t)
+	t.after(async () => {
+		await instance.destroy()
+		await device.close()
+	})
+	await instance.init({ host: '127.0.0.1', port: device.port, moduleAddress: 4 })
+	await waitFor(() => host.variables.connection_status === 'Connected')
+	const portOption = (definition) => definition.options.find((option) => option.id === 'portNum')
+	const setIrPort = portOption(host.actions.portSet)
+	assert.deepEqual(
+		setIrPort.choices.map((choice) => choice.id),
+		['1', '2'],
+	)
+	assert.equal(setIrPort.allowCustom, true)
+	assert.deepEqual(
+		portOption(host.feedbacks.portBusy).choices.map((choice) => choice.id),
+		['1', '2'],
+	)
+	assert.deepEqual(host.presetStructure[0].definitions[2].presets, ['send_2', 'hold_2', 'stop_2'])
+	assert.equal(host.presets.send_3, undefined)
+
+	device.dropAll()
+	await waitFor(() => host.variables.connection_status === 'Disconnected')
+	assert.equal(host.variables.reconnects, 1)
+	assert.equal(host.variables.firmware_version, '')
+	assert.equal(host.feedbacks.connected.callback({ options: {} }), false)
+	assert.ok(host.presets.send_2)
+
+	await waitFor(() => host.variables.connection_status === 'Connected')
+	assert.equal(host.variables.reconnects, 1)
+	assert.equal(host.variables.firmware_version, '710-1005-05')
+	assert.equal(portOption(host.actions.portSet), setIrPort, 'unchanged discovery retains definitions')
+	assert.equal(host.logs.filter((entry) => entry.message.startsWith('Device modules:')).length, 1)
+	assert.deepEqual(device.sendirs(), [])
 })
 
 test('instance without an IP address reports bad config', async (t) => {

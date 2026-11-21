@@ -67,6 +67,91 @@ test('identifies the device on connect', async (t) => {
 	assert.equal(problem, null)
 })
 
+test('holds the queue until device discovery completes', { timeout: 4000 }, async (t) => {
+	const device = new FakeItach()
+	device.ignoreDeviceList = true
+	await device.listen()
+	const client = new ItachClient({ ...FAST, host: '127.0.0.1', port: device.port, responseTimeout: 1000 })
+	t.after(async () => {
+		client.stop()
+		await device.close()
+	})
+	const version = once(client, 'version')
+	client.start()
+	await version
+	const pending = client.sendIR(1, CODE)
+
+	assert.equal(client.state, 'connecting')
+	assert.equal(device.sendirs().length, 0)
+	device._replyWithDevices([...device.sockets][0])
+	assert.equal((await pending).status, 'complete')
+	assert.equal(device.sendirs().length, 1)
+})
+
+test(
+	'falls back to configured ports when firmware answers but the device list is unavailable',
+	{ timeout: 4000 },
+	async (t) => {
+		const device = new FakeItach()
+		device.ignoreDeviceList = true
+		await device.listen()
+		const client = new ItachClient({ ...FAST, host: '127.0.0.1', port: device.port })
+		t.after(async () => {
+			client.stop()
+			await device.close()
+		})
+		client.start()
+
+		const result = await client.sendIR(1, CODE)
+		assert.equal(result.status, 'complete')
+		assert.equal(client.version, '710-1005-05')
+		assert.equal(client.devices, null)
+		assert.equal(device.sendirs().length, 1)
+	},
+)
+
+test('a silent TCP connection leaves queued IR for the next responsive connection', { timeout: 4000 }, async (t) => {
+	const { device, client } = await setup(t)
+	device.silent = true
+	device.dropAll()
+	await waitForState(client, 'disconnected')
+	const pending = client.sendIR(1, CODE)
+	await waitForState(client, 'connecting')
+	await waitForState(client, 'disconnected')
+	assert.equal(device.sendirs().length, 0)
+	assert.equal(client.queueDepth(), 1)
+
+	device.silent = false
+	assert.equal((await pending).status, 'complete')
+	assert.equal(device.sendirs().length, 1)
+})
+
+test(
+	'discovery cannot send a queued code past its deadline before the expiry timer runs',
+	{ timeout: 4000 },
+	async (t) => {
+		const device = new FakeItach()
+		device.ignoreDeviceList = true
+		await device.listen()
+		const client = new ItachClient({ ...FAST, host: '127.0.0.1', port: device.port, responseTimeout: 2000 })
+		t.after(async () => {
+			client.stop()
+			await device.close()
+		})
+		const version = once(client, 'version')
+		client.start()
+		await version
+		const now = Date.now()
+		const clock = t.mock.method(Date, 'now', () => now)
+		const pending = client.sendIR(1, CODE)
+		clock.mock.mockImplementation(() => now + FAST.maxCommandAge + 1)
+		device._replyWithDevices([...device.sockets][0])
+
+		assert.equal((await pending).status, 'expired')
+		assert.equal(device.sendirs().length, 0)
+	},
+)
+
 test('warns when there is no IR module at the configured address', async (t) => {
 	const device = new FakeItach()
 	device.devices = ['device,0,0 ETHERNET', 'device,1,1 SERIAL']
@@ -361,15 +446,15 @@ test('a port-less error from a raw command does not fail the code in flight', as
 
 test('a raw command reply is not stored as the firmware version', async (t) => {
 	const { device, client } = await setup(t, { keepaliveInterval: 40 })
-	while (client.version === '') await sleep(10)
+	assert.equal(client.version, '710-1005-05')
 	const versions = []
 	client.on('version', (version) => versions.push(version))
 	device.rawReplies['get_IR,1:1'] = 'IR,1:1,IR'
 
 	assert.equal(client.sendRaw('get_IR,1:1'), true)
 	await sleep(100)
-	assert.ok(versions.includes('710-1005-05'))
-	assert.ok(versions.every((version) => version === '710-1005-05'))
+	assert.ok(device.received.filter((line) => line === 'getversion').length > 1)
+	assert.deepEqual(versions, [], 'unchanged firmware replies do not publish another update')
 	assert.equal(client.version, '710-1005-05')
 })
 

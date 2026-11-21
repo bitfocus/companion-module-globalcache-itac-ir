@@ -16,6 +16,7 @@ export class FakeItach {
 		this.portlessError = false // send ERR_<code> without a connector
 		this.rawReplies = {} // exact command line -> reply, for raw commands
 		this.devices = ['device,0,0 ETHERNET', 'device,1,3 IR']
+		this.ignoreDeviceList = false
 		this.timers = new Set()
 	}
 
@@ -60,8 +61,8 @@ export class FakeItach {
 
 		if (line === 'getversion') return this._reply(socket, '710-1005-05')
 		if (line === 'getdevices') {
-			for (const d of this.devices) this._reply(socket, d)
-			return this._reply(socket, 'endlistdevices')
+			if (!this.ignoreDeviceList) this._replyWithDevices(socket)
+			return
 		}
 
 		let m
@@ -82,6 +83,11 @@ export class FakeItach {
 
 		if (Object.prototype.hasOwnProperty.call(this.rawReplies, line)) return this._reply(socket, this.rawReplies[line])
 		this._reply(socket, 'ERR_01')
+	}
+
+	_replyWithDevices(socket) {
+		for (const device of this.devices) this._reply(socket, device)
+		this._reply(socket, 'endlistdevices')
 	}
 
 	sendirs() {

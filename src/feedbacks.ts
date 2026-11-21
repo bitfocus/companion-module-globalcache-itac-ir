@@ -1,8 +1,14 @@
 import { combineRgb } from '@companion-module/base'
-import { PORT_CHOICES, toPort } from './actions.js'
-import type { GlobalCacheInstance } from './types.js'
+import { toPort } from './actions.js'
+import type GlobalCacheItachInstance from './main.js'
 
-export function UpdateFeedbacks(instance: GlobalCacheInstance): void {
+export type FeedbacksSchema = {
+	connected: { type: 'boolean'; options: Record<string, never> }
+	portBusy: { type: 'boolean'; options: { portNum: string } }
+	lastFailed: { type: 'boolean'; options: { portNum: string } }
+}
+
+export function UpdateFeedbacks(instance: GlobalCacheItachInstance): void {
 	instance.setFeedbackDefinitions({
 		connected: {
 			type: 'boolean',
@@ -24,7 +30,7 @@ export function UpdateFeedbacks(instance: GlobalCacheInstance): void {
 					label: 'Port',
 					id: 'portNum',
 					default: '1',
-					choices: PORT_CHOICES,
+					choices: instance.portChoices,
 					allowCustom: true,
 					regex: '/^\\d+$/',
 				},
@@ -46,7 +52,7 @@ export function UpdateFeedbacks(instance: GlobalCacheInstance): void {
 					label: 'Port',
 					id: 'portNum',
 					default: 'any',
-					choices: [{ id: 'any', label: 'Any port' }, ...PORT_CHOICES],
+					choices: [{ id: 'any', label: 'Any port' }, ...instance.portChoices],
 					allowCustom: true,
 					regex: '/^(any|\\d+)$/',
 				},

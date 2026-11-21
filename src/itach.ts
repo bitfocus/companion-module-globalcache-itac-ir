@@ -107,6 +107,7 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 	private tickTimer?: NodeJS.Timeout
 	private lastRx = 0
 	private probe: { sentAt: number } | null = null
+	private discovery?: { startedAt: number; sawVersion: boolean; sawDeviceList: boolean }
 	private unattributedRequests = 0
 	private pendingDevices: DeviceInfo[] = []
 	private stateMessage?: string
@@ -251,14 +252,15 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 			clearTimeout(this.connectTimer)
 			socket.setNoDelay(true)
 			socket.setKeepAlive(true, 5000)
-			this.reconnectDelay = this.options.reconnectMin
 			this.lastRx = Date.now()
 			this.unattributedRequests = 0
+			this.devices = null
+			this.version = ''
 			this.pendingDevices = []
-			this._setState('connected', `Connected to ${host}:${port}`)
+			this.discovery = { startedAt: this.lastRx, sawVersion: false, sawDeviceList: false }
 			this.tickTimer = setInterval(() => this._tick(), this.options.tickInterval)
-			this._identify()
-			for (const p of this.ports.keys()) this._pump(p)
+			this._write('getversion')
+			this._write('getdevices')
 		})
 		socket.on('data', (chunk) => {
 			if (socket !== this.socket) return
@@ -279,6 +281,7 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		clearInterval(this.tickTimer)
 		this.tickTimer = undefined
 		this.probe = null
+		this.discovery = undefined
 		socket.removeAllListeners()
 		socket.on('error', () => {})
 		socket.destroy()
@@ -307,11 +310,12 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		this.reconnectTimer = setTimeout(() => this._connect(), delay)
 	}
 
-	private _identify() {
-		// getversion doubles as the first health probe: a device that accepts the
-		// TCP connection but never answers is treated as offline
-		this._probe()
-		this._write('getdevices')
+	private _finishDiscovery() {
+		this.discovery = undefined
+		this.reconnectDelay = this.options.reconnectMin
+		const { host, port } = this.options
+		this._setState('connected', `Connected to ${host}:${port}`)
+		for (const port of this.ports.keys()) this._pump(port)
 	}
 
 	private _probe() {
@@ -323,6 +327,18 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 
 	private _tick() {
 		const now = Date.now()
+		if (this.discovery) {
+			if (now - this.discovery.startedAt >= this.options.responseTimeout) {
+				if (this.discovery.sawVersion || this.discovery.sawDeviceList) {
+					// A responsive device may lack one of the discovery commands.
+					if (!this.discovery.sawDeviceList) this.emit('log', 'debug', 'No complete device list; using known IR ports')
+					this._finishDiscovery()
+				} else {
+					this._dropConnection(this.socket, 'Device did not answer identification requests')
+				}
+			}
+			return
+		}
 		if (this.probe) {
 			if (now - this.probe.sentAt > this.options.responseTimeout) {
 				this._dropConnection(
@@ -408,13 +424,25 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 			case 'endDevices':
 				this.devices = this.pendingDevices
 				this.pendingDevices = []
-				return this.emit('devices', this.devices, this._checkDevices())
+				this.emit('devices', this.devices, this._checkDevices())
+				if (this.discovery) {
+					this.discovery.sawDeviceList = true
+					if (this.discovery.sawVersion) this._finishDiscovery()
+				}
+				return
 			case 'stopped':
 				return
 			case 'version':
-				this._consumeUnattributed()
-				this.version = res.text
-				return this.emit('version', this.version)
+				if (!this.discovery) this._consumeUnattributed()
+				if (this.version !== res.text) {
+					this.version = res.text
+					this.emit('version', this.version)
+				}
+				if (this.discovery) {
+					this.discovery.sawVersion = true
+					if (this.discovery.sawDeviceList) this._finishDiscovery()
+				}
+				return
 			default:
 				this._consumeUnattributed()
 				return this.emit('log', 'debug', `Unexpected reply from device: ${line}`)
@@ -543,12 +571,17 @@ export class ItachClient extends EventEmitter<ClientEvents> {
 		this._syncQueueExpiry(p)
 		if (!this.connected || p.inflight || p.waiting) return
 
-		const queued = p.queue.shift()
+		let queued = p.queue.shift()
+		while (queued) {
+			this._pauseExpiry(queued)
+			if (queued.ageRemaining > 0) break
+			this._expire(queued)
+			queued = p.queue.shift()
+		}
 		if (!queued) {
 			this.emit('queue')
 			return
 		}
-		this._pauseExpiry(queued)
 
 		const cmd: InflightCommand = Object.assign(queued, { id: this.nextId })
 		this.nextId = this.nextId >= MAX_ID ? 1 : this.nextId + 1

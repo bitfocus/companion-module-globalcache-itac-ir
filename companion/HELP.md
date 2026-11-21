@@ -6,7 +6,7 @@ Control projectors, displays and other IR devices through a Global Caché iTach 
 
 1. Enter the **IP address** of the iTach. Find it with the iHelp utility or in your router's DHCP client list. Give the iTach a fixed IP or a DHCP reservation so it can't move.
 2. Leave **TCP Port** at 4998 and **IR Module Address** at 1 for an iTach.
-3. After connecting, the log lists the modules the device reports. If the module address doesn't point to an IR module, the connection shows a warning.
+3. After connecting, the log lists the modules the device reports. The selected IR module’s port count determines the port choices and presets. You can still enter a port number manually. If the module address doesn't point to an IR module, the connection shows a warning.
 
 ### Capturing IR codes
 
@@ -50,7 +50,7 @@ Codes saved with earlier versions of this module keep working. Spaces and line b
 
 ### Recovery
 
-- The connection is retried automatically, every second at first and backing off to every 5 seconds, until the device is back.
+- The connection is retried automatically, every second at first and backing off to every 5 seconds, until the device is back. Queued sends wait for identification and still expire according to **Discard codes not started within**.
 - An idle connection is checked every 10 seconds by default (**Connection check interval**). This catches a device that lost power or network without closing the connection, so it reconnects before the next button press instead of failing.
 - A missing confirmation also triggers an immediate connection check.
 
@@ -59,7 +59,7 @@ Codes saved with earlier versions of this module keep working. Spaces and line b
 - **Device connected**, **Port sending**, and **Last code failed** feedbacks.
 - Variables: `connection_status`, `firmware_version`, `queue_depth`, `last_port`, `last_result`, `last_error`, `last_latency_ms`, `sent_total`, `failed_total`, `reconnects`.
 
-The **Status** preset shows the connection state, turns red when a code fails, and reconnects when pressed.
+The **Status** preset shows the connection state, turns red when a code fails, and reconnects when pressed. Each port has a group containing its **Send**, **Hold to repeat**, and **Stop** presets.
 
 ### Troubleshooting
 
